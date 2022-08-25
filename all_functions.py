@@ -195,6 +195,26 @@ def write_single_case(oc, study_id, case_id):
         json.dump(case_data, writer)
 
 
+def get_multi_case_data(oc, study_id, case_limit):
+    """ Retrieve the first <case_limit> cases from a study
+
+    args:
+        oc: OpenCGA client
+        study_id [str]: id specifying project and study
+        case_id [str]: id specifying case within that study
+
+    returns:
+        cases: list of case dicts
+    """
+
+    cases = oc.clinical.search(
+        study = study_id,
+        limit = case_limit
+        ).get_results()
+
+    return cases
+
+
 def get_case_disorder(case):
     """ Identify the main disorder associated with a case.
 
@@ -644,28 +664,11 @@ def import_hgnc_dump(csv_file):
 
     hgnc_df = pd.read_csv(csv_file, sep='\t')
 
-    hgnc_df = rename_columns(hgnc_df)
-
-    return hgnc_df
-
-
-def rename_columns(hgnc_df):
-    """ Renames dataframe columns to standardised values.
-
-    Args:
-        df [pandas dataframe]
-
-    Returns:
-        df [pandas dataframe]: columns have been renamed
-    """
-
-    renamed_columns = [
+    hgnc_df.columns = [
         'hgnc_id',
         'symbol',
         'prev_symbol',
         'alias_symbol']
-
-    hgnc_df.columns = renamed_columns
 
     return hgnc_df
 
@@ -930,10 +933,9 @@ def compare_panel_entities(original, current):
 
 
 def get_hgnc_string(entity_list):
-    """ Given a list of PanelApp entities, get any HGNC symbols
-    associated with those entities, and construct a string of
-    comma-separated HGNC numbers. This is used to create a bed file for
-    the relevant genes.
+    """ Given a list of current or original entities, construct a string
+    of comma-separated HGNC numbers (not complete HGNC ids) associated
+    with those entities where such exist.
 
     args:
         entity_list [list]: PanelApp entities (genes or regions)
@@ -944,21 +946,19 @@ def get_hgnc_string(entity_list):
 
     hgnc_string = ''
 
-    for entity in entity_list:
-        if entity['associated_gene']:
+    for single_panel in entity_list:
+        for entity_type in single_panel.keys():
+            for single_entity_list in single_panel[entity_type]:
 
-            hgnc = entity['associated_gene'][6:]
+                if single_entity_list[-1]:
 
-            if entity != entity_list[-1]:
-                hgnc_string += f'{hgnc},'
-
-            else:
-                hgnc_string += f'{hgnc}'
+                    hgnc = single_entity_list[-1][5:]
+                    hgnc_string += f'{hgnc},'
 
     return hgnc_string
 
 
-def get_biomart_output(case_id, panel_list):
+def create_bed_files(case_id, case_panels):
     """ Using the output of get_case_panels(), create bed files for the
     entities (genes and STRs) covered in the original and current
     versions of the panels in the case.
@@ -985,85 +985,61 @@ def get_biomart_output(case_id, panel_list):
 
     # get lists of all entities in original and current versions of panels
 
-    original = []
-    current = []
-
-    for panel in panel_list:
-
-        for entity in panel['original_entities']:
-            if entity not in original:
-                original.append(entity)
-
-        for entity in panel['current_entities']:
-            if entity not in current:
-                current.append(entity)
+    original_hgnc_string = get_hgnc_string(case_panels['original_ents'])
+    current_hgnc_string = get_hgnc_string(case_panels['current_ents'])
 
     # define destinations for output bed files
 
     arg_dicts = [
-        {'input': original,
-        'output': f'data/bed_files/case_{case_id}_original.bed'},
+        {'input': original_hgnc_string,
+        'output': f'do_not_upload/bed_files/case_{case_id}_original.bed'},
 
-        {'input': current,
-        'output': f'data/bed_files/case_{case_id}_current.bed'}
+        {'input': current_hgnc_string,
+        'output': f'do_not_upload/bed_files/case_{case_id}_current.bed'}
         ]
 
     # query BioMart API using subprocess for each list of entities
 
     for dict in arg_dicts:
 
-        hgnc_string = get_hgnc_string(dict['input'])
-        filename = dict['output']
+        with open('bed_text.txt', 'r') as reader:
+            contents = reader.read()
 
-        query = (f'https://grch37.ensembl.org/biomart/martservice?query=<?xml '
-            'version="1.0" encoding="utf-8"?><!DOCTYPE Query>'
-            '<Query count="" datasetConfigVersion="0.6" formatter="TSV" '
-            'header="0" uniqueRows="0" virtualSchemaName="default">'
-            '<Dataset interface="default" name="hsapiens_gene_ensembl">'
-            '<Filter name="hgnc_id" value="{hgnc_string}"/>'
-            '<Attribute name="chromosome_name"/>'
-            '<Attribute name="start_position"/>'
-            '<Attribute name="end_position"/>'
-            '</Dataset></Query>')
+        query = contents.replace('PLACEHOLDER', dict['input'])
 
         biomart_call = [
-            'wget',
-            '-O',
-            f'{filename}',
-            f'{query}',
-            ]
+                        'wget',
+                        '-O',
+                        f"{dict['output']}",
+                        f'{query}',
+                        ]
 
         subprocess.run(biomart_call)
+
+    # sort the file by chromosome, then start position
+
+    sort_bed_file(arg_dicts[0]['output'])
+    sort_bed_file(arg_dicts[1]['output'])
 
     return arg_dicts[0]['output'], arg_dicts[1]['output']
 
 
-def write_bed_query_template(template_file, case_id, gene_string):
-    """ Construct an XML query file to supply to BioMart for a specific case
+def sort_bed_file(filename):
+    """ Given the path to a bed file with tab-delimited columns, sort
+    the data by chromosome and position.
 
     args:
-        template_file: name of XML file containing template BioMart query
-        case_id: ID of OpenCGA case
-        gene_string: comma-separated list of HGNC IDs (lacking 'HGNC:' prefix)
-
-    returns:
-        output_file: path to XML BioMart query file for specified case
+        filename [str]
     """
 
-    with open(template_file, 'r') as reader:
-        template_contents = reader.read()
+    with open(filename, 'r') as reader:
+        bed_data = pd.read_csv(reader, sep = '\t', header = None)
 
-    soup = bs(template_contents, 'xml')
+    bed_data.columns = ['chrom', 'start', 'end']
+    sorted = bed_data.sort_values(by = ['chrom', 'start'])
 
-    # Replace empty tag attribute with list of HGNC IDs
-    soup.Filter['value'] = gene_string
-
-    output_file = f'data/case_{case_id}_bed_query.xml'
-
-    with open(output_file, 'w') as writer:
-        writer.write(str(soup))
-
-    return output_file
+    with open(filename, 'w') as writer:
+        sorted.to_csv(writer, sep = '\t', header = False, index = False)
 
 
 """ Functions on VCFs """
@@ -1174,13 +1150,13 @@ def filter_vcf(vcf_file, bed_file, minQ, output_prefix):
     return f'{output_prefix}.recode.vcf'
 
 
-def sort_variants(vcf_file, output_file):
+def sort_vcf_file(vcf_file, output_file):
     """
     Use 'bcftools sort' to sort a .vcf file
 
     Args:
-        vcf_file [string]: name of input .bam file
-        output_file [string]: name for output .bam file
+        vcf_file [string]: name of input file
+        output_file [string]: name for output file
 
     Command line:   bcftools sort \
                         -o vcf_file/sorted.vcf \
@@ -1207,92 +1183,6 @@ def sort_variants(vcf_file, output_file):
     return output_file
 
 
-""" Study-level functions which aren't useful but keeping for reference """
-
-
-def get_multi_case_data(oc, study_id, case_limit):
-    """ Retrieve the first <case_limit> cases from a study
-
-    args:
-        oc: OpenCGA client
-        study_id [str]: id specifying project and study
-        case_id [str]: id specifying case within that study
-
-    returns:
-        cases: list of case dicts
-    """
-
-    cases = oc.clinical.search(
-        study = study_id,
-        limit = case_limit
-        ).get_results()
-
-    return cases
-
-
-def get_study_file_count(oc, study_id):
-    """ Print the number of files in a study
-
-    args:
-        oc: OpenCGA client
-        study_id [str]: id specifying project and study
-
-    returns:
-        len(files): number of files in the study
-    """
-
-    files = oc.files.search(
-        study = study_id,
-        include = 'id',
-        ).get_results()
-
-    print(f'{study_id} contains {len(files)} files')
-
-    return len(files)
-
-
-def get_study_individual_count(oc, study_id):
-    """ Print the number of individuals in a study
-
-    args:
-        oc: OpenCGA client
-        study_id [str]: id specifying project and study
-
-    returns:
-        len(individuals): number of individuals in the study
-    """
-
-    individuals = oc.individuals.search(
-        study = study_id,
-        include = 'id'
-        ).get_results()
-
-    print(f'{study_id} contains {len(individuals)} individuals')
-
-    return len(individuals)
-
-
-def get_study_sample_count(oc, study_id):
-    """ Print the number of samples in a study
-
-    args:
-        oc: OpenCGA client
-        study_id [str]: id specifying project and study
-
-    returns:
-        len(samples): number of samples in the study
-    """
-
-    samples = oc.samples.search(
-        study = study_id,
-        include = 'id',
-        ).get_results()
-
-    print(f'{study_id} contains {len(samples)} samples')
-
-    return len(samples)
-
-
 """ Implementation """
 
 
@@ -1317,7 +1207,10 @@ def main():
     all_cases_file = 'do_not_upload/info_lists/all_case_data.json'
 
     single_case_file = 'do_not_upload/SAP-48034-1_case_data.json'
-    single_case_vcf = 'do_not_upload/vcfs/SAP-48034-1.vcf'
+    initial_vcf = 'do_not_upload/vcfs/SAP-48034-1.vcf'
+    sorted_vcf = 'do_not_upload/vcfs/SAP-48034-1_sorted.vcf'
+    filtered_original = 'do_not_upload/vcfs/SAP-48034-1_filtered_original'
+    filtered_current = 'do_not_upload/vcfs/SAP-48034-1_filtered_current'
 
     pa_panels_file = '20220818_current_panels.json'
     # pa_panels_file = '{date}_current_panels.json'
@@ -1325,6 +1218,9 @@ def main():
 
     hgnc_dump = '20220817_hgnc_dump.txt'
     hgnc_df = import_hgnc_dump(hgnc_dump)
+
+    original_bed = f'do_not_upload/bed_files/case_{case_id}_original.bed'
+    current_bed = f'do_not_upload/bed_files/case_{case_id}_current.bed'
 
     chr_file = 'convert_scaffolds'
 
@@ -1380,20 +1276,29 @@ def main():
 
     """ functions that are probably going to be the pipeline """
 
-    # identify the panel id and version originally used
-    case_panels = get_case_panels(case_data)
+    # # identify the panel id and version originally used
+    # case_panels = get_case_panels(case_data)
 
-    # identify all genes associated with original panel versions
-    case_panels = get_all_case_entities(hgnc_df, case_panels)
+    # # identify all genes associated with original panel versions
+    # case_panels = get_all_case_entities(hgnc_df, case_panels)
 
-    # generate an info file about original and current panels
-    generate_case_summary(date, case_id, case_panels)
+    # # generate an info file about original and current panels
+    # generate_case_summary(date, case_id, case_panels)
 
-    # # construct bed files for these sets of genes
+    # # # construct bed files for these sets of genes
+    # original_bed, current_bed = create_bed_files(case_id, case_panels)
 
-    # # filter the case vcf on these bed files and on variant QUAL score
+    # sort the vcf
+    sorted_vcf = sort_vcf_file(initial_vcf, sorted_vcf)
 
-    # # sort the filtered vcf
+    # filter the vcf on the bed files and on variant QUAL score
+    original_filtered = filter_vcf(
+        sorted_vcf, original_bed, '20', filtered_original)
+
+    current_filtered = filter_vcf(
+        sorted_vcf, current_bed, '20', filtered_current)
+
+
 
     # # annotate the vcf - gnomad, clinvar
 
