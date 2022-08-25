@@ -99,7 +99,7 @@ def get_all_study_ids(oc, project_id):
         study_ids [list]
         """
 
-    project_studies = oc.studies.search(project = project_id).get_results()
+    project_studies = oc.studies.search(project=project_id).get_results()
 
     study_ids = [study['id'] for study in project_studies]
     study_ids.sort()
@@ -121,7 +121,7 @@ def get_all_case_ids(oc, study_id):
         case_ids [list]: list of case ID strings
     """
 
-    cases = oc.clinical.search(study = study_id, include = 'id').get_results()
+    cases = oc.clinical.search(study=study_id, include='id').get_results()
 
     case_ids = [case['id'] for case in cases]
     case_ids.sort()
@@ -172,8 +172,8 @@ def get_single_case_data(oc, study_id, case_id):
     """
 
     case = oc.clinical.info(
-        study = study_id,
-        clinical_analysis = case_id
+        study=study_id,
+        clinical_analysis=case_id
         ).get_results()[0]
 
     return case
@@ -208,8 +208,8 @@ def get_multi_case_data(oc, study_id, case_limit):
     """
 
     cases = oc.clinical.search(
-        study = study_id,
-        limit = case_limit
+        study=study_id,
+        limit=case_limit
         ).get_results()
 
     return cases
@@ -361,69 +361,69 @@ def generate_case_summary(date, case_id, case_panels):
     df = pd.DataFrame(panel_info)
 
     with pd.ExcelWriter(filename) as writer:
-        df.to_excel(writer, index = False)
+        df.to_excel(writer, index=False)
 
     format_excel(filename, len(panel_info['id']))
 
 
 def format_excel(filename, rows):
-        """ Visually format an existing excel file. Apply a style to
-        dataframe header cells, and set column widths to autofit data.
+    """ Visually format an existing excel file. Apply a style to
+    dataframe header cells, and set column widths to autofit data.
 
-        args:
-            filename: path to file
-        """
+    args:
+        filename: path to file
+    """
 
-        # load in the excel file
+    # load in the excel file
 
-        wb = load_workbook(filename = filename)
-        ws = wb['Sheet1']
+    wb = load_workbook(filename=filename)
+    ws = wb['Sheet1']
 
-        # define a style for a default font type and size
+    # define a style for a default font type and size
 
-        normal_font = NamedStyle(name = "normal_font")
+    normal_font = NamedStyle(name="normal_font")
 
-        normal_font.font = Font(name = 'Arial', size = 10)
+    normal_font.font = Font(name='Arial', size=10)
 
-        normal_font.alignment = Alignment(
-            horizontal = 'left',
-            vertical = 'center')
+    normal_font.alignment = Alignment(
+        horizontal='left',
+        vertical='center')
 
-        wb.add_named_style(normal_font)
+    wb.add_named_style(normal_font)
 
-        # define a style to highlight header cells
+    # define a style to highlight header cells
 
-        highlight = NamedStyle(name = "highlight")
+    highlight = NamedStyle(name="highlight")
 
-        highlight.font = Font(bold = True, name = 'Arial', size = 10)
+    highlight.font = Font(bold=True, name='Arial', size=10)
 
-        highlight.alignment = Alignment(vertical = 'center')
+    highlight.alignment = Alignment(vertical='center')
 
-        highlight.fill = PatternFill(
-            fill_type = 'solid',
-            start_color = '00C0C0C0',  # light grey
-            end_color = '00C0C0C0')
+    highlight.fill = PatternFill(
+        fill_type='solid',
+        start_color='00C0C0C0',  # light grey
+        end_color='00C0C0C0')
 
-        wb.add_named_style(highlight)
+    wb.add_named_style(highlight)
 
-        # apply the default formattings
+    # apply the default formattings
 
-        for col in 'ABCDEFGHIJKLMNOP':
-            for row in range(rows + 1):
+    for col in 'ABCDEFGHIJKLMNOP':
+        for row in range(rows + 1):
 
-                ws[f'{col}{row + 1}'].style = 'normal_font'
+            ws[f'{col}{row + 1}'].style = 'normal_font'
 
-            ws[f'{col}1'].style = 'highlight'
+        ws[f'{col}1'].style = 'highlight'
 
-        # set all columns to be 5cm wide
+    # set all columns to be 5cm wide
 
-        for col in 'BGHKLOP':
-            ws.column_dimensions[col].width = 25.5
+    for col in 'BGHKLOP':
+        ws.column_dimensions[col].width = 25.5
 
-        for col in 'ACDEFIJMN':
-            ws.column_dimensions[col].width = 12
+    for col in 'ACDEFIJMN':
+        ws.column_dimensions[col].width = 12
 
-        wb.save(filename = filename)
+    wb.save(filename=filename)
 
 
 def print_case_panels(case):
@@ -628,8 +628,8 @@ def print_awkward_variant(oc):
     different tiers """
 
     case_info = oc.clinical.info(
-        study = 'emee-glh@reanalysis:rd37',
-        clinical_analysis = 'SAP-3904-1'
+        study='emee-glh@reanalysis:rd37',
+        clinical_analysis='SAP-3904-1'
         ).get_results()[0]
 
     variants = case_info['interpretation']['primaryFindings']
@@ -733,7 +733,7 @@ def get_hgnc_from_symbol(hgnc_df, gene_symbol):
 """ Functions on PanelApp data """
 
 
-def get_panelapp_panel(panel_id, panel_version = None):
+def get_panelapp_panel(panel_id, panel_version=None):
     """ Retrieve panel object representing specified version of a
     PanelApp panel ('Panelapp.Panel' doesn't always work, because some
     older panel versions don't contain the hgnc_symbol element)
@@ -793,7 +793,7 @@ def write_all_pa_panels(filename):
         json.dump(all_panels, writer)
 
 
-def write_single_panel_text(id, version = None):
+def write_single_panel_text(id, version=None):
     """ Dump out the contents of a PanelApp panel to a text file
 
     args:
@@ -809,7 +809,7 @@ def write_single_panel_text(id, version = None):
         writer.write(str(panel))
 
 
-def write_single_panel_json(id, version = None):
+def write_single_panel_json(id, version=None):
     """ Dump out the contents of a PanelApp panel to a json file
 
     args:
@@ -992,10 +992,10 @@ def create_bed_files(case_id, case_panels):
 
     arg_dicts = [
         {'input': original_hgnc_string,
-        'output': f'do_not_upload/bed_files/case_{case_id}_original.bed'},
+            'output': f'do_not_upload/bed_files/case_{case_id}_original.bed'},
 
         {'input': current_hgnc_string,
-        'output': f'do_not_upload/bed_files/case_{case_id}_current.bed'}
+            'output': f'do_not_upload/bed_files/case_{case_id}_current.bed'}
         ]
 
     # query BioMart API using subprocess for each list of entities
@@ -1033,13 +1033,13 @@ def sort_bed_file(filename):
     """
 
     with open(filename, 'r') as reader:
-        bed_data = pd.read_csv(reader, sep = '\t', header = None)
+        bed_data = pd.read_csv(reader, sep='\t', header=None)
 
     bed_data.columns = ['chrom', 'start', 'end']
-    sorted = bed_data.sort_values(by = ['chrom', 'start'])
+    sorted = bed_data.sort_values(by=['chrom', 'start'])
 
     with open(filename, 'w') as writer:
-        sorted.to_csv(writer, sep = '\t', header = False, index = False)
+        sorted.to_csv(writer, sep='\t', header=False, index=False)
 
 
 """ Functions on VCFs """
@@ -1200,7 +1200,6 @@ def main():
     study_id = f'emee-glh@{project}:{study}'
     case_id = 'SAP-48034-1'
 
-
     """ Reference data """
 
     all_case_ids_file = 'all_case_ids.txt'
@@ -1224,7 +1223,6 @@ def main():
 
     chr_file = 'convert_scaffolds'
 
-
     """ Store OpenCGA data locally """
 
     # # set up an OpenCGA session
@@ -1238,7 +1236,6 @@ def main():
 
     # # retrieve and write out data from specific case (SAP-48034-1)
     # write_single_case(oc, study_id, case_id)
-
 
     """ Read in stored data """
 
@@ -1298,12 +1295,11 @@ def main():
     current_filtered = filter_vcf(
         sorted_vcf, current_bed, '20', filtered_current)
 
-
-
     # # annotate the vcf - gnomad, clinvar
 
 
-    beepy.beep(sound = 'ready')
+
+    beepy.beep(sound='ready')
 
 
 if __name__ == '__main__':
