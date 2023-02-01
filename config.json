@@ -1,0 +1,10 @@
+{
+    "rest": {
+      "hosts": [
+        "https://ws.zettagenomics.com/cellbase"
+      ]
+    },
+    "version": "v5",
+    "species": "hsapiens",
+    "assembly": "GRCh38"
+}

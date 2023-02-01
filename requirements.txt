@@ -1,6 +1,7 @@
-beautifulsoup4
+beautifulsoup4==4.9.1
 lxml
-pandas
-panelapp
+pandas==1.4.1
+panelapp==0.7.3
+pycellbase==5.2.6
 pyopencga
-
+pyopencga==2.2.1
