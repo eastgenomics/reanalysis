@@ -385,7 +385,7 @@ def create_bed(panels, output_fp):
 
     hgnc_string = ','.join([ele for ele in genes])
 
-    with open('bed_template.txt', 'r') as reader:
+    with open('resources/home/dnanexus/bed_template.txt', 'r') as reader:
         contents = reader.read()
 
     query = contents.replace('PLACEHOLDER', hgnc_string)
@@ -903,83 +903,27 @@ def apply_filters(variants, parameters):
     """
 
     output_variants = {}
-    lof_vars = ['stop_gained', 'start_lost']
-    exclude = ['intron_variant', '5_prime_UTR_variant',
-        'non_coding_transcript_exon_variant']
+    high_risk = ['frameshift_variant', 'stop_gained', 'stop_lost']
 
     for variant in variants:
 
-        variant['filters'] = {
-            'affected_transcripts': False,
-            'af': False,
-            'cadd': False,
-            'has_vda': False,
-            'constraint': False,
-            'passed_filters': 0}
-
-        # does the variant affect any transcripts
-
+        # variant must affect a transcript
         if variant['affected_transcripts']:
-            variant['filters']['affected_transcripts'] = True
-            variant['filters']['passed_filters'] += 1
 
-        # compare allele frequency to threshold
+            # variant AF must be below threshold, or not observed
+            if (variant['allele_frequency'] <= parameters['max_af']) or \
+                not variant['allele_frequency']:
 
-        if not variant['allele_frequency'] or \
-            (variant['allele_frequency'] and
-            (variant['allele_frequency'] <= parameters['max_af'])):
+                # rare transcript-affecting frameshifts always pass
+                if variant['consequence'] in high_risk:
 
-            variant['filters']['af'] = True
-            variant['filters']['passed_filters'] += 1
+                    output_variants[variant['id']] = variant
 
-        # compare CADD score to threshold
+                # CADD score must be above threshold
+                elif variant['scaled_cadd'] and \
+                    (variant['scaled_cadd'] >= parameters['min_cadd']):
 
-        if variant['scaled_cadd'] and \
-            (variant['scaled_cadd'] >= parameters['min_cadd']):
-
-            variant['filters']['cadd'] = True
-            variant['filters']['passed_filters'] += 1
-
-        # does the variant have any DisGeNET variant-disease associations
-        # for info only - not currently used for filtering
-
-        if variant['vda']:
-            variant['filters']['has_vda'] = True
-
-        # compare constraint to relevant thresholds
-        # for info only - not currently used for filtering
-
-        consq = variant['consequence']
-        constraint = variant['constraint']
-
-        if consq and constraint:
-
-            if (consq == 'synonymous_variant') and \
-                (constraint['oe_syn'] <= parameters['max_oe_syn']):
-
-                variant['filters']['constraint'] = True
-                variant['filters']['passed_filters'] += 1
-
-            elif (consq == 'missense_variant') and \
-                (constraint['oe_mis'] <= parameters['max_oe_mis']):
-
-                variant['filters']['constraint'] = True
-                variant['filters']['passed_filters'] += 1
-
-            elif (consq in lof_vars) and \
-                ((constraint['oe_lof'] <= parameters['max_oe_lof']) or
-                (constraint['exac_pLI'] >= parameters['min_pli'])):
-
-                variant['filters']['constraint'] = True
-
-        # add variant to output depending on which filters passed
-
-        if (consq not in exclude) and \
-            (variant['filters']['af']) and \
-            (variant['filters']['cadd']) and \
-            (variant['filters']['affected_transcripts']):
-
-            output_variants[variant['variant']] = variant
+                        output_variants[variant['id']] = variant
 
     return output_variants
 
@@ -1081,8 +1025,7 @@ def filter_on_segregation(case):
             if (case['affected'][person] == 'True') and \
                 (case['adopted'][person] == 'False'):
 
-                output = f"outside_github/vcfs/{case['case_id']}" \
-                    f"_4_segregation_{i}.vcf"
+                output = f"{case['case_id']}_4_segregation_{i}.vcf"
 
                 subprocess.run(
                     ['bedtools', 'intersect',
@@ -1093,8 +1036,7 @@ def filter_on_segregation(case):
             # if person is NOT affected, get proband vars not seen in person
             elif case['affected'][person] == 'False':
 
-                output = f"outside_github/vcfs/{case['case_id']}" \
-                    f"_4_segregation_{i}.vcf"
+                output = f"{case['case_id']}_4_segregation_{i}.vcf"
 
                 subprocess.run(
                     ['bedtools', 'intersect',
@@ -1128,8 +1070,7 @@ def filter_de_novo(case):
     for person, vcf in case['vcfs']['b38_sorted'].items():
         if person in parents:
 
-            output = f"outside_github/vcfs/{case['case_id']}" \
-                f"_4_denovo_{i}.vcf"
+            output = f"{case['case_id']}_4_denovo_{i}.vcf"
 
             subprocess.run(
                 ['bedtools', 'intersect',
@@ -1144,10 +1085,7 @@ def filter_de_novo(case):
 def run_whole_case(case_id, chrom_map, genome_file, chain_file, parameters):
     """  """
 
-    json_fp = f'outside_github/inputs/{case_id}.json'
-    vcf_initial = f'outside_github/inputs/{case_id}'
-    vcf_prefix = f'outside_github/intermediates/{case_id}'
-    output_dir = 'outside_github/outputs/'
+    json_fp = f'{case_id}.json'
 
     # parse case json for required data
 
@@ -1160,7 +1098,7 @@ def run_whole_case(case_id, chrom_map, genome_file, chain_file, parameters):
     assert 'proband' in case['vcfs']['paths'].keys(), \
         'Error: Proband VCF path required'
 
-    bed_file = f'outside_github/bed_files/{case_id}.bed'
+    bed_file = f'{case_id}.bed'
     create_bed(case['panels'], bed_file)
 
     # obtain a copy of each VCF from its path
@@ -1170,9 +1108,9 @@ def run_whole_case(case_id, chrom_map, genome_file, chain_file, parameters):
         assert len(vcf) == 1, f'{person} has multiple VCFs'
 
         if vcf[0].endswith('.vcf.gz'):
-            local_path = f'{vcf_initial}_1_{person}.vcf.gz'
+            local_path = f'{case_id}_1_{person}.vcf.gz'
         elif vcf[0].endswith('.vcf'):
-            local_path = f'{vcf_initial}_1_{person}.vcf'
+            local_path = f'{case_id}_1_{person}.vcf'
 
         case['vcfs']['initial'][person] = local_path
 
@@ -1183,22 +1121,16 @@ def run_whole_case(case_id, chrom_map, genome_file, chain_file, parameters):
 
     for person, vcf in case['vcfs']['initial'].items():
 
-        fixed_vcf = f'{vcf_prefix}_2_fixed_{person}.vcf.gz'
-        marked_vcf = f'{vcf_prefix}_3a_marked_{person}.vcf.gz'
-        b38_vcf = f'{vcf_prefix}_3b_marked_b38_{person}.vcf.gz'
+        fixed_vcf = f'{case_id}_2_fixed_{person}.vcf.gz'
+        marked_vcf = f'{case_id}_3a_marked_{person}.vcf.gz'
+        b38_vcf = f'{case_id}_3b_marked_b38_{person}.vcf.gz'
 
         fix_chroms(vcf, fixed_vcf, chrom_map)
-        fixed_pcvs = mark_pcvs(fixed_vcf, marked_vcf, pcvs_initial)
-
-        if person == 'proband':
-            assert fixed_pcvs == pcvs_initial, \
-                f'Error: PCVs lost during fixing\n' \
-                f'Initial PCVS: {pcvs_initial}\n' \
-                f'Retained after fixing: {fixed_pcvs}'
-
         genome = identify_genome(marked_vcf)
 
         if genome == 'GRCh37':
+            fixed_pcvs = mark_pcvs(fixed_vcf, marked_vcf, pcvs_initial)
+
             lifted_pcvs = lift_over_vcf(
                 marked_vcf, b38_vcf, genome_file, chain_file, pcvs_initial)
 
@@ -1211,7 +1143,7 @@ def run_whole_case(case_id, chrom_map, genome_file, chain_file, parameters):
                 case['pcvs']['b38'] = lifted_pcvs
 
         elif genome == 'GRCh38':
-            b38_vcf = marked_vcf
+            b38_vcf = fixed_vcf
 
             if person == 'proband':
                 case['pcvs']['b38'] = pcvs_initial
@@ -1230,10 +1162,10 @@ def run_whole_case(case_id, chrom_map, genome_file, chain_file, parameters):
 
     for person, vcf in case['vcfs']['b38'].items():
 
-        filter_prefix = f'{vcf_prefix}_4_filtered_{person}'
-        sorted = f'{vcf_prefix}_5_sorted_{person}.vcf'
+        filter_prefix = f'{case_id}_4_filtered_{person}'
+        sorted = f'{case_id}_5_sorted_{person}.vcf'
         case['vcfs']['b38_sorted'][person] = sorted
-        output_fp = f'{output_dir}{case_id}_{person}.txt'
+        output_fp = f'{case_id}_{person}.txt'
 
         filter_1 = filter_on_bed(
             vcf, bed_file, parameters['qual'], filter_prefix)
@@ -1241,7 +1173,7 @@ def run_whole_case(case_id, chrom_map, genome_file, chain_file, parameters):
         sort_vcf(filter_1, sorted)
 
         # saving a VCF's annotated variants reduces API calls in testing
-        json_vars = f'outside_github/intermediates/{case_id}_6_{person}_ann.json'
+        json_vars = f'{case_id}_6_{person}_ann.json'
         try:
             with open(json_vars, 'r') as reader:
                 anno = json.load(reader)
@@ -1338,20 +1270,20 @@ def main():
     all_case_ids_file = 'all_case_ids.txt'
 
     cases_with_vcfs = [
-        'outside_github/inputs/SAP-55997-1.json',  # b38 solved (2), p & twin (A)
-        'outside_github/inputs/SAP-56251-1.json']  # b38 solved (2), p & parents (NA)
+        'SAP-55997-1.json',  # b38 solved (2), p & twin (A)
+        'SAP-56251-1.json']  # b38 solved (2), p & parents (NA)
 
     cases_no_vcfs = [
-        'outside_github/inputs/SAP-48034-1.json',  # unsolved, no vars
-        'outside_github/inputs/SAP-56130-1.json',  # unsolved, no vars
-        'outside_github/inputs/SAP-56069-1.json',  # unsolved, 1 var?
-        'outside_github/inputs/SAP-56172-1.json']  # partially solved, v1, 9 vars
+        'SAP-48034-1.json',  # unsolved, no vars
+        'SAP-56130-1.json',  # unsolved, no vars
+        'SAP-56069-1.json',  # unsolved, 1 var?
+        'SAP-56172-1.json']  # partially solved, v1, 9 vars
 
-    gen_dir = 'outside_github/genomes/'
-    genome_file = f'{gen_dir}GCF_000001405.40_GRCh38.p14_genomic.fna'
-    chain_file = f'{gen_dir}hg19ToHg38.over.chain.gz'
-
-    chrom_map = 'chrom_map.txt'
+    res_dir = "resources/home/dnanexus/"
+    bed_template = f"{res_dir}bed_template.txt"
+    chrom_map = f"{res_dir}chrom_map.txt"
+    genome_file = f"{res_dir}GCF_000001405.40_GRCh38.p14_genomic.fna"
+    chain_file = f"{res_dir}hg19ToHg38.over.chain.gz"
 
     """ define filtering parameters """
 

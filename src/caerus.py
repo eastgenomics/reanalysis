@@ -1,19 +1,19 @@
 #!usr/bin/env python
 
 """
-Program to process a single EGLH 100k rare disease case.
-Called within caerus.sh.
+Program to process a single EGLH 100k rare disease case, filter and
+prioritise variants from the original VCF output, and return potential
+causal variants.
 
 Inputs
-    case_id [str]
-    json [fp]: 100k JSON containing case data
-    vcfs [fp array]: SNV vcf.gz files available for this case
+    case_json [fp]: 100k JSON containing case data
+    case_vcfs [fp array]: SNV vcf.gz files available for this case
 
 Intermediate files
 
 
 Outputs
-    variants [fp]: excel workbook of variant data
+    <case id>_report.xlsx [fp]: excel workbook of variant data
 """
 
 
@@ -22,15 +22,14 @@ import json
 import os
 import pandas as pd
 import re
-import shutil
 import subprocess
 import sys
 
 from datetime import datetime as dt
 from functools import wraps
-from panelapp import api, Panelapp, queries
-from pycellbase.cbconfig import ConfigClient
+from panelapp import api, Panelapp
 from pycellbase.cbclient import CellBaseClient
+from pycellbase.cbconfig import ConfigClient
 
 
 """ utility functions """
@@ -85,33 +84,36 @@ def get_panelapp_panel(panel_id, panel_version=None):
     return result
 
 
-""" preliminary checks """
+""" process json """
 
 
-def check_same_case(case_id, json_data, vcfs):
-    """ confirm case ids match between all inputs """
+def download_files(case_id):
+    """ Download the JSON payload and any SNV VCFs associated with the
+    specified case from the 003_230124_caerus DNAnexus project.
 
-    json_id = json_data['case_id']
+    args:
+        case_id [str]
 
-    assert case_id == json_id, \
-        f"JSON case ID {json_id} doesn't match {case_id}."
+    returns:
+        json_fp [str]
+    """
 
-    for vcf in vcfs:
+    subprocess.run(["src/file_downloader.sh", case_id])
 
-        vcf_id = do something here
+    for file in os.listdir():
+        if file.endswith('.json') and (case_id in file):
+            json_fp = file
 
-        assert vcf_id == case_id, \
-            f"{vcf} case ID {vcf_id} doesn't match {case_id}."
+    assert json_fp, f"Error: JSON file for {case_id} not downloaded"
+
+    return json_fp
 
 
-def check_rd_case(case_id, json_data):
+def check_rd_case(json_data):
     """ confirm rare disease case """
 
     assert json_data['program'].strip().lower() == 'rare_disease', \
-        f"{case_id} is not a rare disease case."
-
-
-""" process json """
+        f"{json_data['case_id']} is not a rare disease case."
 
 
 def setup_case_dict(json_data):
@@ -130,23 +132,19 @@ def setup_case_dict(json_data):
         'family': {
             'affected': {},
             'adopted': {},
-            'samples': {},
-            'vcfs': {}},
+            'vcfs': {
+                'original': {}}},
         'initial_analysis': {
             'panels': [],
             'variants': {
                 'reported': [],
-                'b38_lifted': [],
-                'annotated': {}},
+                'b38': []},
             'solved': {
                 'fully': False,
                 'partially': False}},
         'reanalysis': {
             'panels': [],
-            'parameters': {},
-            'variants': {
-                'filtered': [],
-                'annotated': {}}}}
+            'variants': {}}}
 
     return case
 
@@ -163,31 +161,27 @@ def get_family_info(json_data, case):
         case [dict]
     """
 
+    family = json_data['interpretation_request_data'][
+        'json_request']['pedigree']['members']
+
     # identify whether the proband is adopted
 
     adopted = True
 
-    for person in json_data['interpretation_request_data']['json_request'][
-        'pedigree']['members']:
-
+    for person in family:
         if person['isProband']:
             if person['adoptedStatus'].lower() == 'notadopted':
                 adopted = False
-            elif person['adoptedStatus'].lower() == 'adopted':
-                adopted = True
 
-    # get info for (a) proband (b) all family if proband is not adopted
+    # get info for proband, or all family if proband is not adopted
 
-    for person in json_data['interpretation_request_data']['json_request'][
-        'pedigree']['members']:
-
+    for person in family:
         if person['isProband'] or not adopted:
 
             # get relationship to proband
 
             if person['isProband']:
                 relation = 'proband'
-
             else:
                 relation = person['additionalInformation'][
                     'relation_to_proband'].lower()
@@ -221,25 +215,26 @@ def get_family_info(json_data, case):
                 if s['product'] == 'DNA']
 
             if samples:
-                case['family']['samples'][relation] = samples
-                case['family']['vcfs'][relation] = {}
-                vcf_paths = []
+                vcfs = []
 
-                for sample in case['family']['samples'][relation]:
+                for vcf in json_data['interpretation_request_data'][
+                    'json_request']['vcfs']:
 
-                    vcfs = [vcf['uriFile'] for vcf in json_data[
-                        'interpretation_request_data']['json_request']['vcfs']
-                        if (sample in vcf['sampleId'])
-                        and (vcf['fileType'] == 'VCF_small')]  # only SNVs
+                    for sample in samples:
 
-                    for vcf in vcfs:
-                        vcf_paths.append(vcf)
+                        if (sample in vcf['sampleId']) and \
+                            (vcf['fileType'] == 'VCF_small'):
 
-                if vcf_paths:
-                    assert len(vcf_paths) == 1, \
+                            vcfs.append(vcf['uriFile'])
+
+                if vcfs:
+                    assert len(vcfs) == 1, \
                         f"{case['id']} {relation} has multiple VCF paths"
 
-                    case['family']['vcfs'][relation]['path'] = vcf_paths[0]
+                    pattern = r'(?<=Variations\/)(.*?)(?=$)'
+                    vcf_ids = re.findall(pattern, vcfs[0])
+
+                    case['family']['vcfs']['original'][relation] = vcf_ids[0]
 
     return case
 
@@ -312,12 +307,13 @@ def get_case_solved_info(json_data, case):
         'shortTandemRepeats',
         'chromosomalRearrangements']
 
-    for report in json_data['clinicalReports']:
+    for report in json_data['clinical_report']:
         if report['valid']:
-            if report['exitQuestionnaire']:
+            if report['exit_questionnaire']:
 
-                solved = report['exitQuestionnaire'][
-                    'familyLevelQuestions']['caseSolvedFamily']
+                solved = report['exit_questionnaire'][
+                    'exit_questionnaire_data']['familyLevelQuestions'][
+                    'caseSolvedFamily']
 
                 if solved == 'yes':
                     case['initial_analysis']['solved']['fully'] = True
@@ -354,15 +350,16 @@ def get_case_solved_info(json_data, case):
 
 
 @time_execution
-def create_bed(case, bed_fp):
+def create_bed(case, bed_template, bed_output):
     """ Given a set of PanelApp panel IDs, retrieve data for the current
     versions of those panels and parse out their genes and regions. Use
     these to create a bed file via the Ensembl BioMart (GRCh38) API.
-    Save this at the location specified by bed_fp.
+    Save this at the location specified by bed_output.
 
     args:
         case [dict]
-        bed_fp [str]: fp to write bed file to
+        bed_template [fp]: location of template for api call
+        bed_output [fp]: location to write output bed file to
     """
 
     # list all unique panel genes and regions
@@ -385,7 +382,7 @@ def create_bed(case, bed_fp):
 
     # read in template biomart query and insert string of HGNC ids
 
-    with open('bed_template.txt', 'r') as reader:
+    with open(bed_template, 'r') as reader:
         contents = reader.read()
 
     hgnc_string = ','.join([ele for ele in genes])
@@ -393,11 +390,11 @@ def create_bed(case, bed_fp):
 
     # query biomart using subprocess
 
-    subprocess.run(['wget', '-O', bed_fp, query])
+    subprocess.run(['wget', '-O', bed_output, query])
 
     # add panel regions to the new bed file
 
-    with open(bed_fp, 'r') as reader:
+    with open(bed_output, 'r') as reader:
         bed_data = pd.read_csv(reader, sep='\t', header=None)
 
     bed_data.columns = ['chrom', 'start', 'end']
@@ -408,7 +405,7 @@ def create_bed(case, bed_fp):
 
     sorted = updated_bed.sort_values(by=['chrom', 'start'])
 
-    with open(bed_fp, 'w') as writer:
+    with open(bed_output, 'w') as writer:
         sorted.to_csv(writer, sep='\t', header=True, index=False)
 
 
@@ -469,8 +466,7 @@ def get_panel_regions(panel_data):
 @time_execution
 def fix_chroms(input_vcf, output_vcf, chrom_map):
     """ Modify a VCF file so that any UCSC-style CHROM values are
-    converted to standard notation. In addition, change the INFO field
-    for any potential causal variants as a means of tracking them.
+    converted to standard notation.
 
     args:
         input_vcf [fp]
@@ -511,11 +507,6 @@ def identify_genome(vcf):
 
     ref_genome = all_refs[0]
 
-    if ref_genome == 'GRCh37':
-        print(f'{vcf} requires liftover to GRCh38')
-    elif ref_genome == 'GRCh38':
-        print(f'{vcf} does not require liftover to GRCh38')
-
     return ref_genome
 
 
@@ -527,7 +518,7 @@ def mark_pcvs(input_vcf, output_vcf, pcvs):
 
     args:
         input_vcf [fp]: vcf to be lifted over
-        output_vcf [fp]: path to save output to
+        output_vcf [fp]: path to save output marked vcf to
         pcvs [list]: list of variants in form '<chrom>:<pos>:<ref>:<alt>'
 
     returns:
@@ -543,7 +534,7 @@ def mark_pcvs(input_vcf, output_vcf, pcvs):
 
     new_lines = []
     pcvs_present = []
-    pcv_line = '##INFO=<ID=PCV,Number=1,Type=Integer,' \
+    pcv_header_line = '##INFO=<ID=PCV,Number=1,Type=Integer,' \
         'Description="Potential causal variant">\n'
 
     for idx, line in enumerate(lines):
@@ -551,11 +542,13 @@ def mark_pcvs(input_vcf, output_vcf, pcvs):
         if idx % 1000000 == 0:
             print(f"{idx} lines processed")
 
+        # include all header lines in the output vcf
         if line.startswith('#'):
             if line.startswith('#CHROM'):
-                new_lines.append(pcv_line)
+                new_lines.append(pcv_header_line)
             new_lines.append(line)
 
+        # modify body lines if for pcvs, otherwise include unmodified
         else:
             split = line.split('\t')
             chrom = split[0].strip()
@@ -567,9 +560,10 @@ def mark_pcvs(input_vcf, output_vcf, pcvs):
             if var in pcvs:
                 split[7] == 'PCV=1'
                 pcvs_present.append(var)
-
-            new_line = '\t'.join(split)
-            new_lines.append(new_line)
+                new_line = '\t'.join(split)
+                new_lines.append(new_line)
+            else:
+                new_lines.append(line)
 
     pcvs_present.sort()
 
@@ -582,7 +576,9 @@ def mark_pcvs(input_vcf, output_vcf, pcvs):
 
 @time_execution
 def lift_over_vcf(vcf_in, vcf_out, genome_file, chain_file, pcvs):
-    """ Liftover a b37 VCF file to b38 using CrossMap.
+    """ Liftover a b37 VCF file to b38 using CrossMap. If potential
+    causal variants were identified in the original analysis, confirm
+    that they are still present after liftover.
 
     args:
         vcf_in [fp]
@@ -713,13 +709,13 @@ def sort_vcf(vcf_fp, output_fp):
 
 @time_execution
 def cb_client_annotation(vcf_fp):
-    """ Use the CB client to retrieve variant information.
+    """ Use the CellBase client to retrieve variant information.
 
     args:
         vcf_fp [fp]: variants to annotate
 
     returns:
-        anno [list]: each element is a dict of annotation for 1 variant
+        anno [list]: list of dicts, each holds annotation for 1 variant
     """
 
     var_list = []
@@ -758,23 +754,23 @@ def cb_client_annotation(vcf_fp):
 
 
 @time_execution
-def condense_annotation(anno, pcvs):
+def condense_annotation(anno_in, pcvs):
     """ Extract specific data values from an annotated list of variants
     if present.
 
     args:
-        anno [list]: full annotation of all SNVs from sorted VCF
+        anno_in [list]: full annotation of all SNVs from sorted VCF
         pcvs [list of str]: variants identified in original analysis
 
     returns:
-        anno_less [list]: all variants, but only necessary data kept
+        anno_out [list]: all variants, but only necessary data kept
         anno_pcvs [list]: annotation for originally found variants
     """
 
-    anno_less = []
+    anno_out = []
     anno_pcvs = []
 
-    for variant in anno:
+    for variant in anno_in:
 
         results = variant['results'][0]
 
@@ -783,9 +779,7 @@ def condense_annotation(anno, pcvs):
             'consequence': None,
             'allele_frequency': None,
             'scaled_cadd': None,
-            'affected_transcripts': {},
-            'constraint': {},
-            'vda': []}
+            'affected_transcripts': {}}
 
         # get the general variant consequence (e.g. missense_variant)
         try:
@@ -808,15 +802,6 @@ def condense_annotation(anno, pcvs):
             for dct in results['functionalScore']:
                 if dct['source'] == 'cadd_scaled':
                     var_dict['scaled_cadd'] = dct['score']
-
-        except KeyError:
-            pass
-
-        # get gene constraint data
-        try:
-            for dct in results['geneConstraints']:
-                if dct['name'] != 'exac_oe_lof':
-                    var_dict['constraint'][dct['name']] = dct['value']
 
         except KeyError:
             pass
@@ -846,28 +831,52 @@ def condense_annotation(anno, pcvs):
         except KeyError:
             pass
 
-        # get DisGeNET variant-disease associations
-        try:
-            for assn in variant['geneTraitAssociation']:
-
-                var_dict['vda'].append({
-                    'id': assn['id'],
-                    'name': assn['name'],
-                    'score': assn['score'],
-                    'sources': assn['sources']})
-
-        except KeyError:
-            pass
-
-        anno_less.append(var_dict)
+        anno_out.append(var_dict)
 
         if var_dict['variant'] in pcvs:
             anno_pcvs.append(var_dict)
 
-    return anno_less, anno_pcvs
+    return anno_out, anno_pcvs
 
 
-# filter
+@time_execution
+def apply_filters(variants, parameters):
+    """ Given annotated variant data and a set of filtering parameters,
+    return only the variants which meet filtering thresholds.
+
+    args:
+        variants [list]: 1 dict of annotation per variant
+        parameters [dict]: values to use for each filter
+
+    returns:
+        output_variants [dict]: subset which passed filtering
+    """
+
+    output_variants = {}
+    high_risk = ['frameshift_variant', 'stop_gained', 'stop_lost']
+
+    for variant in variants:
+
+        # variant must affect a transcript
+        if variant['affected_transcripts']:
+
+            # variant AF must be below threshold, or not observed
+            if (variant['allele_frequency'] <= parameters['max_af']) or \
+                not variant['allele_frequency']:
+
+                # rare transcript-affecting frameshifts always pass
+                if variant['consequence'] in high_risk:
+                    output_variants[variant['id']] = variant
+
+                # CADD score must be above threshold
+                elif variant['scaled_cadd'] and \
+                    (variant['scaled_cadd'] >= parameters['min_cadd']):
+
+                        output_variants[variant['id']] = variant
+
+    return output_variants
+
+
 # de novo analysis
 # segregation analysis
 
@@ -877,78 +886,234 @@ def condense_annotation(anno, pcvs):
 def create_excel(case, parameters, output_fp):
     """  """
 
-    # create an excel file with 3 sheets
-
-    # sheet 1: case data
-    #   solved fully/partially?
-    #   family members with vcfs: relation to proband, affected, adopted
-
-    # sheet 2: variant data
-    #   variant info: id, type, AF, CADD score, transcripts, constraint
-    #   which family members it occurred in
-    #   highlighted in original analysis or reanalysis
-
-    # sheet 3: analysis data
-    #   panel(s) used, list original and current versions
-    #   all genes & regions analysed, and whether in original/reanalysis
-    #   filtering parameters
-
-    return something
-
 
 """ coordinate & execute """
 
 
+def get_cases_list(args):
+    """ Parse the arguments from the call to caerus.py to obtain a list
+    of cases to process.
+
+    args:
+        args [list]: has the value of sys.argv[1:]
+
+    returns:
+        cases [list]: ids of cases to process
+    """
+
+    assert args, \
+        "Call to caerus.py requires at least one argument. Examples:\n" \
+        "\tA single case ID\n" \
+        "\tA space-separated list of case IDs\n" \
+        "\tFilepath of a .txt file containing a case ID on each line\n\n" \
+        "Alternatively, use the argument 'all' to process all cases for " \
+        "which files are available in 003_230124_caerus.\n\n" \
+        "Case IDs should include their version, e.g. SAP-55997-1."
+
+    if len(args) == 1:
+
+        # process all cases for which we have a json and at least one vcf
+        if args[0] == 'all':
+
+            subprocess.run(['list_project_cases.sh'])
+
+            with open('usable_project_cases.txt', 'r') as reader:
+                cases = [case.strip() for case in reader.readlines()
+                    if case.strip()]
+
+        # process a list of cases supplied as lines of a text file
+        elif args[0].endswith('.txt'):
+
+            with open(args[0], 'r') as reader:
+                cases = [case.strip() for case in reader.readlines()
+                    if case.strip()]
+
+        # otherwise assume the arg is a single case id
+        else:
+            cases = [args[0]]
+
+    # if there are multiple args, assume they're a list of case ids
+    else:
+        cases = args[0:]
+
+    return cases
+
+
+def initialise_case(case_id):
+    """ Coordinate the functions to initialise the object which holds
+    all the relevant case information.
+
+    args:
+        case_id [str]
+
+    returns:
+        case [dict]
+    """
+
+    json_fp = download_files(case_id)
+
+    with open(json_fp, 'r') as reader:
+        json_data = json.load(reader)
+
+    check_rd_case(json_data)
+
+    case = setup_case_dict(json_data)
+    case = get_family_info(json_data, case)
+    case = get_original_panels(json_data, case)
+    case = get_current_panels(case)
+    case = get_case_solved_info(json_data, case)
+
+    case_vcfs = case['family']['vcfs']['original']
+    print(f"Case: {case_id}\nJSON: {json_fp}\nVCFs: {case_vcfs}")
+
+    return case
+
+
+def process_case(case, chrom_map, genome_file, chain_file, parameters):
+
+    """ Process the case's VCFs. Involves standardisation of chromosome
+    notation and reference gneomes; annotation; and filtering and
+    prioritising of variants.
+
+    Creates an output excel workbook with details of the analysis and
+    the final prioritised variants.
+
+    args:
+        case [dict]
+        chrom_map [str]: file
+        genome_file
+        chain_file
+        parameters
+    """
+
+    case_id = case['id']
+    case_vcfs = case['family']['vcfs']['original']
+    initial_pcvs = case['initial_analysis']['variants']['reported']
+
+    # process each family member's vcf
+
+    for relation, vcf in case_vcfs.items():
+
+        assert vcf in os.listdir(), \
+            f"{vcf} ({relation}) not present in directory"
+
+        fixed_vcf = f"{case_id}_2a_fixed_{relation}.vcf.gz"
+        marked_vcf = f"{case_id}_2b_marked_{relation}.vcf.gz"
+        lifted_vcf = f"{case_id}_3_b38_{relation}.vcf.gz"
+        vcf_prefix = f"{case_id}_4_filtered_{relation}.vcf.gz"
+        sorted_vcf = f"{case_id}_5_sorted_{relation}.vcf.gz"
+        json_vars = f'{case_id}_6_{relation}_ann.json'
+
+        # fix chromosome notation, identify ref genome used
+
+        fix_chroms(vcf, fixed_vcf, chrom_map)
+        ref_genome = identify_genome(fixed_vcf)
+
+        # b37 vcfs require liftover
+
+        if ref_genome == "GRCh37":
+
+            initial_vcf_pcvs = mark_pcvs(
+                fixed_vcf, marked_vcf, initial_pcvs)
+
+            lifted_vcf_pcvs = lift_over_vcf(
+                marked_vcf, lifted_vcf, genome_file, chain_file, initial_pcvs)
+
+            case['family']['vcfs']['b38'][relation] = lifted_vcf
+
+            if relation == 'proband':
+
+                assert initial_vcf_pcvs == lifted_vcf_pcvs, \
+                    f"PCVs lost during liftover.\n" \
+                    f"Before liftover: {initial_vcf_pcvs}\n" \
+                    f"After liftover: {lifted_vcf_pcvs}"
+
+                case['initial_analysis'][
+                    'variants']['b38'] = lifted_vcf_pcvs
+
+        # b38 are fine as they are
+
+        elif ref_genome == "GRCh38":
+            case['family']['vcfs']['b38'][relation] = fixed_vcf
+
+            if relation == 'proband':
+
+                assert initial_vcf_pcvs == initial_pcvs, \
+                    f"PCVs missing from fixed proband VCF.\n" \
+                    f"Reported: {initial_pcvs}\n" \
+                    f"After fixing: {initial_vcf_pcvs}"
+
+                case['initial_analysis'][
+                    'variants']['b38'] = initial_vcf_pcvs
+
+        b38_vcf = case['family']['vcfs']['b38'][relation]
+        b38_pcvs = case['initial_analysis']['variants']['b38']
+
+        # filter b38 vcfs on bed file and qual score, then sort
+
+        bed_filtered_vcf = filter_on_bed(
+            b38_vcf, f"{case_id}.bed", parameters['qual'], vcf_prefix)
+
+        sort_vcf(bed_filtered_vcf, sorted_vcf)
+
+        # annotate and filter variants in proband vcf
+
+        if relation == 'proband':
+
+            try:  # saving variant annotations reduces API calls during testing
+                with open(json_vars, 'r') as reader:
+                    ann_original = json.load(reader)
+
+            except FileNotFoundError:
+                ann_original = cb_client_annotation(sorted_vcf)
+                with open(json_vars, 'w') as writer:
+                    json.dump(ann_original, writer)
+
+            ann_less = condense_annotation(ann_original, b38_pcvs)
+            ann_final = apply_filters(ann_less, parameters)
+            case['reanalysis']['variants'] = ann_final
+
+    # # create output file
+    # output_fp = f"{dt.now()}_reanalysis_{case_id}.xlsx"
+    # create_excel(case, parameters, output_fp)
+
+    output_fp = f"{dt.now()}_reanalysis_{case_id}.json"
+    with open(output_fp, 'w') as writer:
+        json.dump(case, writer)
+
+
 def main():
-
-    # Show Liv a run-through of the pipeline
-    # Get the VCFs and upload them too
-    # Set up an app which runs the program
-    # Case information
-    #   How many solved (fully or partially) and unsolved cases
-    #   Average number of highlighted variants
-    #       all cases, solved cases, unsolved cases (presumably zero)
-    #   Average number of snv vcfs per case
-    #   proportion with vcfs from both parents
-    #       among all cases, solved cases, unsolved cases
-    # Fix de novo filtering
-    # Fix segregation filtering
-    # Check all cases can be processed through the pipeline
-    # Optimise filtering parameters - check previously highlighted variants are always identified, without returning lots of others…
-
     # define static files
 
-    chrom_map = 'chrom_map.txt'
-    gen_dir = 'outside_github/genomes/'
-    genome_file = f'{gen_dir}GCF_000001405.40_GRCh38.p14_genomic.fna'
-    chain_file = f'{gen_dir}hg19ToHg38.over.chain.gz'
+    res_dir = "resources/home/dnanexus/"
+    bed_template = f"{res_dir}bed_template.txt"
+    chrom_map = f"{res_dir}chrom_map.txt"
+    genome_file = f"{res_dir}GCF_000001405.40_GRCh38.p14_genomic.fna"
+    chain_file = f"{res_dir}hg19ToHg38.over.chain.gz"
 
     # define filtering parameters
 
     parameters = {
         'qual': '20',  # for initial QUAL value filtering
         'max_af': 0.05,  # seen in <=5% of the population (gnomAD)
-        'min_cadd': 10,  # CADD >= 10 implies p(var not observed) >= 0.9
-        'min_pli': 0.9,  # higher implies less tolerant to truncation (gnomAD)
-        'max_oe_lof': 0.35,  # lower implies less tolerant to variants (gnomAD)
-        'max_oe_mis': 0.35,
-        'max_oe_syn': 0.35,
-        'min_vda': 0.75}  # score=0.75 ~= 2+ curated sources (DisGeNET)
+        'min_cadd': 10}  # CADD >= 10 implies p(var not observed) >= 0.9
 
-    # read in arguments to process a single case
+    # process cases
 
-    case_id = sys.argv[1]
-    json_fp = sys.argv[2]
-    vcf_str = sys.argv[3]
-    vcfs = vcf_str.split(' ')
+    cases = get_cases_list(sys.argv[1:])
+    print(f"Cases to be processed: {cases}")
 
-    with open(json_fp, 'r') as reader:
-        json_data = json.load(reader)
+    for case_id in cases:
 
-    # define output filenames
+        case = initialise_case(case_id)
 
+        bed_output = f"{case_id}.bed"
+        create_bed(case, bed_template, bed_output)
 
+        process_case(case_id, chrom_map, genome_file, chain_file, parameters)
 
+    ## MAKE THE EXCEL OUTPUT JAY
+    ## get tier of original variants
 
 
 if __name__ == "__main__":

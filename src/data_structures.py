@@ -1,7 +1,9 @@
 #!usr/bin/env python
 
+import os
 import gzip
 import json
+import statistics
 from datetime import datetime as dt
 
 from pyopencga.opencga_config import ClientConfiguration
@@ -192,7 +194,7 @@ def look_at_json(fp):
     with open(fp, 'r') as reader:
         data = json.load(reader)
 
-    info = data['family']['members'][0]
+    info = data['clinical_report'][0]['exit_questionnaire']['exit_questionnaire_data']
 
     # print(info)
     # print(type(info))
@@ -577,43 +579,226 @@ def annotation_filters(variants, parameters):
     return variants
 
 
+def get_cases_summary():
+
+    # source /mnt/storage/apps/software/dnanexus/0.306.0/dx-toolkit/environment
+    # cd /mnt/storage/samba/samba.ctrulab.uk/cytogenetics/staging_area/jay
+    # ml python3.6.10
+
+    output = {
+        'assembly': {
+            'b37': 0,
+            'b38': 0,
+            'other': []},
+        'panels': [],
+        'solved': {
+            'not_p_or_f': [],
+            'p_only': [],
+            'f_only': [],
+            'p_and_f': []},
+        'variants': {
+            'all_cases': [],
+            'not_p_or_f': [],
+            'p_only': [],
+            'f_only': [],
+            'p_and_f': []}}
+
+    path = "/mnt/storage/samba/samba.ctrulab.uk/cytogenetics/CIPAPI_JSON_FILES/C/"
+
+    for file in os.listdir(path):
+        if file.endswith('.json'):
+            with open(f"{path}{file}", 'r') as reader:
+                contents = json.load(reader)
+
+            # get assembly details
+
+            if contents['assembly'] == 'GRCh38':
+                output['assembly']['b38'] += 1
+
+            elif contents['assembly'] == 'GRCh37':
+                output['assembly']['b37'] += 1
+
+            else:
+                output['assembly']['other'].append(contents['assembly'])
+
+            # get panel details
+
+            try:
+                for panel in contents['interpretation_request_data']['json_request'][
+                'pedigree']['analysisPanels']:
+
+                    output['panels'].append({
+                        'name': panel['specificDisease'],
+                        'id': panel['panelName'],
+                        'version': panel['panelVersion']})
+
+            except KeyError as e:
+                print(f"Error with panels for case {contents['case_id']}: {e}")
+
+            # get solved info
+
+            var_count = 0
+
+            var_types = [
+                'variants',
+                'structuralVariants',
+                'shortTandemRepeats',
+                'chromosomalRearrangements']
+
+            for report in contents['clinical_report']:
+                if report['valid']:
+                    try:
+                        solved = report['exit_questionnaire'][
+                            'exit_questionnaire_data'][
+                                'familyLevelQuestions']['caseSolvedFamily']
+
+                        if solved == 'yes':
+                            solved_fully = True
+                            solved_partially = True
+
+                        elif solved == 'unknown':
+                            solved_partially = True
+
+                        # get number of pcvs
+
+                        for var_type in var_types:
+                            try:
+                                for var in report[
+                                    'clinical_report_data'][var_type]:
+
+                                    var_count += 1
+
+                            except Exception:
+                                pass
+                    except KeyError:
+                        pass
+
+            # collect info
+
+            output['variants']['all_cases'].append(var_count)
+
+            if (not solved_fully) and (not solved_partially):
+                output['solved']['not_p_or_f'].append(contents['case_id'])
+                output['variants']['not_p_or_f'].append(var_count)
+
+            elif (not solved_fully) and solved_partially:
+                output['solved']['p_only'].append(contents['case_id'])
+                output['variants']['p_only'].append(var_count)
+
+            elif solved_fully and (not solved_partially):
+                output['solved']['f_only'].append(contents['case_id'])
+                output['variants']['f_only'].append(var_count)
+
+            elif solved_fully and solved_partially:
+                output['solved']['p_and_f'].append(contents['case_id'])
+                output['variants']['p_and_f'].append(var_count)
+
+    # create json file
+
+    output_file = "summary_data_all_cases.json"
+
+    with open(output_file, 'w') as writer:
+        json.dump(output, writer)
+
+
+def process_cases_summary(file):
+
+    output = {
+        'assembly': {
+            'b37': 0,
+            'b38': 0,
+            'other': []},
+        'panels': [],
+        'solved': {
+            'not_p_or_f': [],
+            'p_only': [],
+            'f_only': [],
+            'p_and_f': []},
+        'variants': {
+            'all_cases': [],
+            'not_p_or_f': [],
+            'p_only': [],
+            'f_only': [],
+            'p_and_f': []}}
+
+    with open(file, 'r') as reader:
+        dict = json.load(reader)
+
+    # print(f"There are {dict['assembly']['b37']} b37 and {dict['assembly']['b38']} b38 cases")
+    # print(f"Overall, the mean number of potential causal variants per case is {statistics.mean(dict['variants']['all_cases'])}")
+
+    # for key, case_list in dict['solved'].items():
+
+    #     cases = dict['solved'][key]
+    #     vars = dict['variants'][key]
+    #     filename = f"case_list_{key}.txt"
+
+    #     if vars:
+    #         print(f"There are {len(cases)} {key} cases. {len(vars)} have potential causal variants. The average number of variants is {statistics.mean(vars)}.")
+    #     else:
+    #         print(f"There are {len(cases)} {key} cases. {len(vars)} have potential causal variants.")
+
+    #     with open(filename, 'w') as writer:
+    #         for case in case_list:
+    #             writer.write(f"{case}\n")
+
+    panels_count = {}
+
+    for panel in dict['panels']:
+        id = panel['id']
+        name = panel['name']
+        version = panel['version']
+
+        # panel id in output dict
+        if id in panels_count.keys():
+            panels_count[id]['count'] += 1
+
+            # panel version in id dict
+            if version in panels_count[id].keys():
+                panels_count[id][version]['count'] += 1
+
+                # panel name in version dict
+                if name in panels_count[id][version]['conditions'].keys():
+                    panels_count[id][version]['conditions'][name] += 1
+
+                # panel name not in version dict
+                elif name not in panels_count[id][version]['conditions'].keys():
+                    panels_count[id][version]['conditions'][name] = 1
+
+            # panel version not in id dict
+            elif version not in panels_count[id].keys():
+                panels_count[id][version] = {'count': 1, 'conditions': {name: 1}}
+
+        # panel id not in output dict
+        elif id not in panels_count.keys():
+            panels_count[id] = {'count': 1, version: {'count': 1, 'conditions': {name: 1}}}
+
+    with open('panels_summary.txt', 'w') as writer:
+        for panel_id, id_value in panels_count.items():
+            writer.write(f"Panel {panel_id} ({id_value['count']} uses)\n")
+            for key, value in id_value.items():
+                if key != 'count':
+                    writer.write(f"\tVersion {key} ({value['count']} uses)\n")
+                    for cond, count in value['conditions'].items():
+                        writer.write(f"\t\t{cond} ({count} uses)\n")
+            writer.write("\n")
+
+
 def main():
     """ Reference data """
 
     date = generate_date()
 
-    top_dir = 'do_not_upload/'
-    json_dir = f'{top_dir}jsons/'
-    vcf_dir = f'{top_dir}vcfs/'
-    gen_dir = f'{top_dir}genomes/'
-    bed_dir = f'{top_dir}bed_files/'
-
-    case_list = [
-        f'{json_dir}SAP-48034-1.json',
-        f'{json_dir}SAP-55997-1.json',
-        f'{json_dir}SAP-56069-1.json',
-        f'{json_dir}SAP-56130-1.json',
-        f'{json_dir}SAP-56172-1.json',
-        f'{json_dir}SAP-56251-1.json']
-
-    all_case_ids_file = 'all_case_ids.txt'
-    case_id = 'SAP-55997-1'
-    case_json = f'{json_dir}{case_id}.json'
-    vcf_prefix = f'{vcf_dir}{case_id}'
-
-    genome_file = f'{gen_dir}b38_genome.fa.bgz'
-    chain = f'{gen_dir}hg19ToHg38.over.chain.gz'
-
-    bed_file = f'{bed_dir}{case_id}.bed'
-
-    hgnc_dump = '20220817_hgnc_dump.txt'
-    # hgnc_df = import_hgnc_dump(hgnc_dump)
+    res_dir = "resources/home/dnanexus/"
+    bed_template = f"{res_dir}bed_template.txt"
+    chrom_map = f"{res_dir}chrom_map.txt"
+    genome_file = f"{res_dir}GCF_000001405.40_GRCh38.p14_genomic.fna"
+    chain_file = f"{res_dir}hg19ToHg38.over.chain.gz"
 
     """ define filtering parameters """
 
-    qual = '20'  # for initial QUAL value filtering
-
     parameters = {
+        'qual': 20,    # for initial QUAL value filtering
         'max_af': 0.05,  # seen in 5% of the population at most
         'min_cadd': 10,  # CADD >= 10 implies p(var not observed) >= 0.9
         'max_pli': 0.9,  # higher pLI implies less tolerant to truncation
@@ -621,30 +806,13 @@ def main():
         'max_oe_mis': 0.35,
         'max_oe_syn': 0.35}
 
-    """ define some semi-random variants for testing """
-
-    test_vars = [
-        '11:2159793:T:C',  # pathogenic INS var (synonymous)
-        '19:17843086:G:T',  # pathogenic JAK3 var (missense)
-        '13:32398437:C:G',  # pathogenic BRCA2 var (LOF, stop gained)
-        '11:34452212:G:A',  # pathogenic CAT var (splice region)
-        '17:43051062:C:T',  # pathogenic BRCA1 var (splice donor)
-        '17:43049196:T:G',  # pathogenic BRCA1 var (splice acceptor)
-        '17:43104967:A:C',  # pathogenic BRCA1 var (intronic)
-        '14:21525060:G:A',  # VOUS in SALL2
-        '7:117559479:G:A']  # most common CFTR variant in gnomad]
-
     """ function calls """
 
-    vcf = f'{vcf_prefix}_1_proband.vcf.gz'
-    b37_vcf = f'{vcf_dir}SAP-48034-1_1_proband.vcf'
-
-    json_file = 'do_not_upload/data_structure/opencga_rd37_CSA-1000-1.json'
-
-    look_at_json(json_file)
+    look_at_json('InterpretationDetail_caseID_Page9_SAP-35035-1__irId=35035__irVersion1_.json')
     # look_at_100k_cases(case_list)
     # look_at_vcf(vcf)
     # look_at_vcf(b37_vcf)
+    # process_cases_summary('summary_data_all_cases.json')
 
 
 if __name__ == '__main__':

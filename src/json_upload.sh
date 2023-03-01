@@ -9,13 +9,9 @@ dx login
 dx select 003_230124_caerus
 dx cd jsons
 
-for old_json in *.json; do
-    rd_check=$(cat "$old_json" | grep '"program": "rare_disease"')
+for json in *.json; do
+    rd_check=$(cat "$json" | grep '"program": "rare_disease"')
     if [ ${rd_check:+1} ]; then
-        case_id=${old_json%__irId=*}
-        case_id=${case_id##*InterpretationDetail_caseID_Page}
-        case_id=${case_id##*_}
-        new_json="${case_id}.json"
-        dx upload --brief --path "${new_json}" "$old_json"
+        dx upload --brief "${json}"
     fi
 done
