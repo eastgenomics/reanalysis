@@ -1,25 +1,18 @@
 #!usr/bin/env python
 
 import os
+import re
 import gzip
 import json
 import statistics
-from datetime import datetime as dt
+import subprocess
 
+from datetime import datetime as dt
+from panelapp import api, Panelapp
 from pyopencga.opencga_config import ClientConfiguration
 from pyopencga.opencga_client import OpencgaClient
 from pycellbase.cbconfig import ConfigClient
 from pycellbase.cbclient import CellBaseClient
-
-
-def gzip_file(fp, content):
-    with gzip.open(fp, 'wt') as writer:
-        writer.write(content)
-
-
-def ungzip_file(fp):
-    with gzip.open(fp, 'rt') as reader:
-        data = reader.read()
 
 
 def generate_date():
@@ -194,20 +187,26 @@ def look_at_json(fp):
     with open(fp, 'r') as reader:
         data = json.load(reader)
 
-    info = data['clinical_report'][0]['exit_questionnaire']['exit_questionnaire_data']
+    info = data['clinical_report'][0]['clinical_report_data']['variants'][0]['reportEvents'][0]
 
-    # print(info)
     # print(type(info))
     # print(len(info))
     # print(type(info[0]))
-
     # print(f'{key}: {value} [{type(value)}]')
     # print(f'{key} ({len(value)})')
     # print(f'{key} [{type(value)}]')
 
-    # IF YOU'RE LOOKING AT A DICT
+    # # IF YOU JUST WANT TO PRINT THE WHOLE THING
+    # print(info)
 
+    # IF YOU'RE LOOKING AT A DICT
     for key, value in info.items():
+
+    # # IF YOU'RE LOOKING AT A LIST OF DICTS
+    # for dict in info:
+    #     for key, value in dict.items():
+
+        # indent for lists of dicts, deindent for dicts
 
         if type(value) in types:
             print(f'{key}: {value} [{type(value)}]')
@@ -226,24 +225,6 @@ def look_at_json(fp):
 
         else:
             print(f'{key} [{type(value)}]')
-
-        # if type(value) == dict:
-        #     print(f"Parent: {key}")
-
-        #     for key1, value1 in value.items():
-        #         if type(value1) in types:
-        #             print(f'{key1}: {value1} [{type(value1)}]')
-
-        #         elif type(value1) == list:
-        #             if len(value1) == 0:
-        #                 print(f'{key1} [empty list]')
-        #             else:
-        #                 print(f'{key1} [list of {len(value1)} {type(value1[0])}]')
-
-        #         else:
-        #             print(f'{key1} [{type(value1)}]')
-
-    return fp
 
 
 def look_at_100k_cases(cases):
@@ -320,6 +301,51 @@ def look_at_vcf(vcf):
         writer.write(f"{vcf} has {len(chroms)} unique values in CHROM field\n")
         for chrom in chroms:
             writer.write(f"{line}\n")
+
+
+def get_variant_lines(vcf_fp):
+    """ Given the path to a VCF file, return a list consisting of the
+    lines describing variants (i.e. the VCF body).
+
+    args:
+        vcf_fp [str]
+
+    returns:
+        var_lines [list]
+    """
+
+    vcf_body = subprocess.run(
+        f"bcftools view -H {vcf_fp}",
+        shell=True,
+        capture_output=True,
+        text=True).stdout
+
+    var_lines = [line.strip() for line in vcf_body.split('\n') if line.strip()]
+
+    return var_lines
+
+
+def count_variant_lines(vcf_fp):
+    """ Given the path to a VCF file, return the number of variants
+    (i.e. non-header lines).
+
+    args:
+        vcf_fp [str]
+
+    returns:
+        var_count [int]
+    """
+
+    result = subprocess.run(
+        f"bcftools view -H {vcf_fp} | wc -l",
+        shell=True,
+        capture_output=True,
+        text=True).stdout
+
+    count = int(result)
+    print(f"{vcf_fp} contains {count} variants")
+
+    return count
 
 
 def cb_client_annotation(output, input):
@@ -784,6 +810,95 @@ def process_cases_summary(file):
             writer.write("\n")
 
 
+def get_panelapp_panel(panel_id, panel_version=None):
+    """ Query the PanelApp API to retrieve data for the specified
+    version of the specified panel. If version is not specified, returns
+    the panel's current version.
+
+    args:
+        panel_id [str]
+        panel_version [str/None]: retrieves current version if None
+
+    returns:
+        result [dict]: all panel data
+    """
+
+    try:
+        result = Panelapp.Panel(str(panel_id), panel_version).get_data()
+
+    # doesn't work for some older panel versions, for various reasons
+
+    except Exception:
+        path = ["panels", str(panel_id)]
+        param = {"version": panel_version}
+        url = api.build_url(path, param)
+        result = api.get_panelapp_response(url)
+
+    return result
+
+
+def get_case_gene_list(case_id, json_fp):
+
+    panels = []
+    genes = []
+
+    with open(json_fp, 'r') as reader:
+        json_data = json.load(reader)
+
+    json_panels = json_data['interpretation_request_data']['json_request']['pedigree']['analysisPanels']
+
+    for panel in json_panels:
+        panels.append({
+            'name': panel['specificDisease'],
+            'id': panel['panelName'],
+            'version': panel['panelVersion']})
+
+    assert len(panels) >= 1
+
+    for panel in panels:
+        panel_data = get_panelapp_panel(panel['id'])
+
+        if panel_data:
+
+            for gene in panel_data['genes']:
+                if gene['confidence_level'] == '3' and \
+                    gene['gene_data']['hgnc_id'] and \
+                    (gene['gene_data']['hgnc_id'] not in genes):
+                    genes.append(gene['gene_data']['hgnc_id'])
+
+    print(f'{case_id} covers {len(genes)} genes')
+
+    return genes
+
+
+def test_vcf_regex(vcf):
+
+    var_line_count = count_variant_lines(vcf)
+
+    var_list = []
+    lines = get_variant_lines(vcf)
+
+    for line in lines:
+
+        chrom_pos = re.findall(r'^(.*?)\t(.*?)\t', line)  # fields 0,1
+        ref_alt = re.findall(r'\t([ACGNT]*)\t([ACGNT]*)\t', line)  # fields 3,4
+
+        for strings in chrom_pos, ref_alt:
+
+            assert len(strings) == 1, \
+                f"variant regex error 1: {strings} list length != 1"
+
+            assert len(strings[0]) == 2, \
+                f"variant regex error 1: {strings} tuple length != 2"
+
+        variant = f"{chrom_pos[0][0]}:{chrom_pos[0][1]}:{ref_alt[0][0]}:{ref_alt[0][1]}"
+
+        var_list.append(variant)
+        print(variant)
+
+    print(f'{len(var_list)} variants output')
+
+
 def main():
     """ Reference data """
 
@@ -808,11 +923,20 @@ def main():
 
     """ function calls """
 
-    look_at_json('InterpretationDetail_caseID_Page9_SAP-35035-1__irId=35035__irVersion1_.json')
+    json_input_1 = 'InterpretationDetail_caseID_Page9_SAP-32023-1__irId=32023__irVersion1_.json'
+    json_output_1 = 'SAP-32023-1_temp_output.json'
+    vcf_1 = 'SAP-32023-1_5_sorted_proband.vcf.gz'
+
+    json_input_2 = 'InterpretationDetail_caseID_Page9_SAP-33169-1__irId=33169__irVersion1_.json'
+    json_output_2 = 'SAP-33169-1_temp_output.json'
+
+    look_at_json(json_input_1)
     # look_at_100k_cases(case_list)
     # look_at_vcf(vcf)
     # look_at_vcf(b37_vcf)
     # process_cases_summary('summary_data_all_cases.json')
+    # genes = get_case_gene_list('SAP-32023-1', json_1)
+    # test_vcf_regex(vcf_1)
 
 
 if __name__ == '__main__':

@@ -1,5 +1,8 @@
+*.gz
 *.vcf*
-Interpretation*.json
 *.bed
+*.log
+*.tab.*
+*_temp_*
 *_genomic.fna*
-cbtools.py
+Interpretation*.json

@@ -9,12 +9,20 @@ dx select 003_230124_caerus
 if [[ $# == 1 ]]; then
 
     case_id="$1"
-    echo "Retrieving files for ${case_id}"
+    json_file=$(dx ls jsons/*"${case_id}"*)
+
+    if [[ ! -f "$json_file" ]]; then
+        dx download "jsons/${json_file}" -f --no-progress
+    else
+        echo "Skipping download of ${json_file}"
+    fi
 
     for file in $(dx ls "$case_id"); do
         if [[ "$file" != *.SV.* ]]; then
             if [[ ! -f "$file" ]]; then
-                dx download "${case_id}/${file}" -f
+                dx download "${case_id}/${file}" -f --no-progress
+            else
+                echo "Skipping download of ${file}"
             fi
         fi
     done
@@ -25,5 +33,3 @@ info_2="Example: 'caerus.sh SAP-35035-1'. "
 info_3="Arguments passed: $*"
 echo "${info_1}${info_2}${info_3}"
 fi
-
-echo "File download completed."
