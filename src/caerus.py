@@ -83,49 +83,59 @@ def generate_date():
     return date
 
 
-def count_variant_lines(vcf_fp):
-    """ Given the path to a VCF file, return the number of variants
-    (i.e. non-header lines).
+def get_vcf_section_lines(vcf, section):
+    """ Given the path to a VCF file, return the header or variant lines
+    as a list.
 
     args:
-        vcf_fp [str]
+        vcf [str]
+        section [str]: 'header' or 'variant'
 
     returns:
-        var_count [int]
+        lines [list]
     """
 
-    result = subprocess.run(
-        f"bcftools view -H {vcf_fp} | wc -l",
-        shell=True,
-        capture_output=True,
-        text=True).stdout
+    if section == 'header':
 
-    count = int(result)
-    print(f"{vcf_fp} contains {count} variants")
+        content = subprocess.run(f"bcftools view -h {vcf}",
+            shell=True, capture_output=True, text=True).stdout
+
+    elif section == 'variant':
+
+        content = subprocess.run(f"bcftools view -H {vcf}",
+            shell=True, capture_output=True, text=True).stdout
+
+    lines = [line.strip() for line in content.split('\n') if line.strip()]
+
+    return lines
+
+
+def count_vcf_section_lines(vcf, section):
+    """ Given the path to a VCF file, return the number of header or
+    body lines.
+
+    args:
+        vcf [str]
+        section [str]: 'header' or 'variant'
+
+    returns:
+        count [int]
+    """
+
+    if section == 'header':
+
+        content = subprocess.run(f"bcftools view -h {vcf} | wc -l",
+            shell=True, capture_output=True, text=True).stdout
+
+    elif section == 'variant':
+
+        content = subprocess.run(f"bcftools view -H {vcf} | wc -l",
+            shell=True, capture_output=True, text=True).stdout
+
+    count = int(content)
+    print(f"{vcf} has {count} {section} lines")
 
     return count
-
-
-def get_variant_lines(vcf_fp):
-    """ Given the path to a VCF file, return a list consisting of the
-    lines describing variants (i.e. the VCF body).
-
-    args:
-        vcf_fp [str]
-
-    returns:
-        var_lines [list]
-    """
-
-    vcf_body = subprocess.run(
-        f"bcftools view -H {vcf_fp}",
-        shell=True,
-        capture_output=True,
-        text=True).stdout
-
-    var_lines = [line.strip() for line in vcf_body.split('\n') if line.strip()]
-
-    return var_lines
 
 
 def get_panelapp_panel(panel_id, panel_version=None):
@@ -306,7 +316,11 @@ def download_files(case_id):
     subprocess.run(f"src/file_downloader.sh {case_id}", shell=True)
 
     for file in os.listdir():
-        if file.endswith('.json') and (case_id in file):
+
+        if file.startswith('InterpretationDetail') and \
+            file.endswith('.json') and \
+            (case_id in file):
+
             json_fp = file
 
     assert json_fp, f"Error: JSON file for {case_id} not downloaded"
@@ -970,7 +984,7 @@ def process_single_individual(case, relation):
 
 
 @time_execution
-def cb_client_annotation(vcf_fp, cb_config):
+def cb_client_annotation(case_id, vcf, cb_config):
     """ Use the CellBase client to retrieve variant information.
 
     args:
@@ -980,39 +994,79 @@ def cb_client_annotation(vcf_fp, cb_config):
         anno [list]: list of dicts, each holds annotation for 1 variant
     """
 
-    var_list = []
-    lines = get_variant_lines(vcf_fp)
+    # list all the variants in the VCF as chrom:pos:ref:alt
+    # yes, it is silly
+
+    print('Identifying variants to annotate...')
+
+    vars = []
+    lines = get_vcf_section_lines(vcf, 'variant')
 
     for line in lines:
 
-        c_p = re.findall(r'^(.*?)\t(.*?)\t', line)  # chrom & pos
-        r_a = re.findall(r'\t([ACGNT]*)\t([ACGNT]*)\t', line)  # ref & alt
+        c_p = re.search(r'^(.*?)\t(.*?)\t', line).groups()  # chrom, pos
+        r_a = re.search(r'\t([ACGT]*)\t([ACGT]*)\t', line).groups()  # ref, alt
 
-        variant = f"{c_p[0][0]}:{c_p[0][1]}:{r_a[0][0]}:{r_a[0][1]}"
-        var_list.append(variant)
+        for strings in c_p, r_a:
+            assert len(strings) == 2, \
+                f"variant regex: should be (field1, field2) but got {strings}"
 
-    cc = ConfigClient(cb_config)
-    cbc = CellBaseClient(cc)
-    var_client = cbc.get_variant_client()
+        variant = f"{c_p[0]}:{c_p[1]}:{r_a[0]}:{r_a[1]}"
 
-    anno = var_client.get_annotation(var_list, include=[
-        # 'conservation',
-        # 'cytoband',
-        # 'hgvs',
-        # 'variation',  # equivalent to 'id'
-        # 'mirnaTargets',  # 'geneMirnaTargets'
-        # 'drugInteraction',  # 'geneDrugInteraction'
-        # 'geneConstraints',
-        # 'geneDisease'  # 'geneTraitAssociation'
-        'functionalScore',
-        'populationFrequencies',  # 'populationFrequencies' + 'id'
-        'consequenceType'])  # 'consequenceTypes' + 'displayConsequenceType'
+        if variant not in vars:
+            vars.append(variant)
 
-    return anno
+    # if variant list is long, split into groups - can't cope with
+    # holding all annotations for very large numbers of variants
+
+    if len(vars) > 20000:
+        groups = [vars[x:x+20000] for x in range(0, len(vars), 20000)]
+
+    else:
+        groups = [vars]
+
+    print(f"Annotating {len(vars)} variants in {len(groups)} groups")
+
+    # check whether the annotation files already exist
+
+    anno_files = 0
+
+    for file in os.listdir():
+        if file.startswith(f'{case_id}_annotation_group_'):
+            anno_files += 1
+
+    if anno_files != len(groups):
+
+        # get annotations for the groups of variants
+
+        cc = ConfigClient(cb_config)
+        cbc = CellBaseClient(cc)
+        var_client = cbc.get_variant_client()
+
+        for idx, group in enumerate(groups):
+
+            print(f"Annotating group {idx}")
+
+            grp_ann = var_client.get_annotation(group, include=[
+                'conservation', 'geneConstraints', 'functionalScore',
+                'consequenceType', 'populationFrequencies'])
+
+            # options for 'include':
+
+            # 'hgvs', 'cytoband', 'conservation', 'geneConstraints',
+            # 'functionalScore','variation' (='id'),
+            # 'mirnaTargets' (='geneMirnaTargets'),
+            # 'geneDisease' (='geneTraitAssociation')
+            # 'drugInteraction' (='geneDrugInteraction'),
+            # 'populationFrequencies' (= 'populationFrequencies' + 'id')
+            # 'consequenceType' (='consequenceTypes', 'displayConsequenceType')
+
+            with open(f'{case_id}_annotation_group_{idx}.json', 'w') as writer:
+                json.dump(grp_ann, writer)
 
 
 @time_execution
-def condense_annotation(input_vars):
+def condense_annotation(case_id):
     """ Extract specific data values from an annotated list of variants
     if present.
 
@@ -1025,70 +1079,81 @@ def condense_annotation(input_vars):
 
     output_vars = []
 
-    for variant in input_vars:
+    # deal with each group of annotated variants one by one, so it
+    # doesn't have to hold everything in memory at once
 
-        results = variant['results'][0]
+    for file in os.listdir():
+        if file.startswith(f'{case_id}_annotation_group_'):
 
-        var_dict = {
-            'id': variant['id'].strip(),
-            'consequence': None,
-            'gnomad_af': None,
-            'scaled_cadd': None,
-            'transcripts': {},
-            'original': False,
-            'reanalysis': False}
+            with open(file, 'r') as reader:
+                contents = json.load(reader)
 
-        # get the general variant consequence (e.g. missense_variant)
-        try:
-            var_dict['consequence'] = results['displayConsequenceType']
+            for variant in contents:
 
-        except KeyError:
-            pass
+                results = variant['results'][0]
 
-        # get allele frequency (global gnomAD AF)
-        try:
-            for dct in results['populationFrequencies']:
-                if dct['population'] == 'ALL':
-                    var_dict['gnomad_af'] = dct['altAlleleFreq']
+                var_dict = {
+                    'id': variant['id'].strip(),
+                    'consequence': None,
+                    'gnomad_af': None,
+                    'scaled_cadd': None,
+                    'transcripts': {},
+                    'original': False,
+                    'reanalysis': False}
 
-        except KeyError:
-            pass
+                # get the general variant consequence (e.g. missense_variant)
 
-        # get the scaled CADD score
-        try:
-            for dct in results['functionalScore']:
-                if dct['source'] == 'cadd_scaled':
-                    var_dict['scaled_cadd'] = dct['score']
+                var_dict['consequence'] = results.get('displayConsequenceType')
 
-        except KeyError:
-            pass
+                # get allele frequency (global gnomAD AF)
 
-        # get affected genes and transcripts
-        try:
-            genes = {}
+                paf = results.get('populationFrequencies')
 
-            for dct in results['consequenceTypes']:
+                if paf:
+                    for dct in paf:
+                        if dct.get('population') == 'ALL':
+                            var_dict['gnomad_af'] = dct.get('altAlleleFreq')
 
-                gene = dct['geneName']
+                # get the scaled CADD score
 
-                if gene not in genes.keys():
-                    genes[gene] = {}
+                functional = results.get('functionalScore')
 
-                transcript = dct['transcriptId']
+                if functional :
+                    for dct in functional:
+                        if dct.get('source') == 'cadd_scaled':
+                            var_dict['scaled_cadd'] = dct.get('score')
 
-                if transcript not in genes[gene].keys():
-                    genes[gene][transcript] = []
+                # get affected genes and transcripts
 
-                for effect in dct['sequenceOntologyTerms']:
-                    if effect['name'] not in genes[gene][transcript]:
-                        genes[gene][transcript].append(effect['name'])
+                genes = {}
+                types = results.get('consequenceTypes')
 
-            var_dict['transcripts'] = genes
+                if types:
+                    for dct in types:
 
-        except KeyError:
-            pass
+                        gene = dct.get('geneName')
+                        tran = dct.get('transcriptId')
+                        effects = dct.get('sequenceOntologyTerms')
 
-        output_vars.append(var_dict)
+                        if gene:
+                            if gene not in genes.keys():
+                                genes[gene] = {}
+
+                            if tran:
+                                if tran not in genes[gene].keys():
+                                    genes[gene][tran] = []
+
+                                if effects:
+                                    for effect in effects:
+                                        name = effect.get('name')
+
+                                        if name:
+                                            if name not in genes[gene][tran]:
+                                                genes[gene][tran].append(name)
+
+                var_dict['transcripts'] = genes
+
+                output_vars.append(var_dict)
 
     return output_vars
 
@@ -1119,8 +1184,7 @@ def apply_filters(input_vars, params, original_vars):
         if var['transcripts']:
 
             # low population af or not observed
-            if (var['gnomad_af'] <= params['max_af']) or \
-                not var['gnomad_af']:
+            if not var['gnomad_af'] or (var['gnomad_af'] <= params['max_af']):
 
                 # frameshift, or high cadd score
                 if var['consequence'] in high_risk or \
@@ -1155,16 +1219,14 @@ def create_excel(case, output_fp):
     row = 0
     col = 0
 
-    df_dict['info'].to_excel(
+    df_dict['info_df'].to_excel(
         writer,
         sheet_name='case_info',
         startrow=row,
         startcol=col,
         header=False)
 
-    for df_row in df_dict['info'].iterrows():
-            row += 1
-    row += 1
+    row += 5
 
     df_dict['param_df'].to_excel(
         writer,
@@ -1173,9 +1235,7 @@ def create_excel(case, output_fp):
         startcol=col,
         header=False)
 
-    for df_row in df_dict['info'].iterrows():
-            row += 1
-    row += 1
+    row += 6
 
     df_dict['family_df'].to_excel(
         writer,
@@ -1197,6 +1257,8 @@ def create_excel(case, output_fp):
         writer,
         sheet_name='panels',
         index=False)
+
+    writer.save()
 
 
 def create_dfs(case):
@@ -1237,12 +1299,12 @@ def create_dfs(case):
     panels = {'original_id': [], 'original_name': [], 'original_version': [],
         'retrieved_id': [], 'retrieved_name': [], 'retrieved_version': []}
 
-    for panel_id, panel_dict in case['panels'].items:
+    for panel_id, panel_dict in case['panels'].items():
         panels['original_id'].append(panel_id)
-        panels['original_name'].append(panel_dict['original_name'])
-        panels['original_version'].append(panel_dict['original_version'])
         panels['retrieved_id'].append(panel_dict['retrieved_id'])
+        panels['original_name'].append(panel_dict['original_name'])
         panels['retrieved_name'].append(panel_dict['retrieved_name'])
+        panels['original_version'].append(panel_dict['original_version'])
         panels['retrieved_version'].append(panel_dict['retrieved_version'])
 
     output_dicts = {
@@ -1381,28 +1443,20 @@ def process_case(case, use_family):
             case = filter_on_affection(case)
             vcf_to_annotate = case['family']['vcfs']['intersect']
 
-    # annotate and filter variants in specified vcf
-    # (saving variant annotations as jsons reduces API calls during testing)
+    # annotate variants using cellbase, then filter on parameters
 
     cb_config = case['reanalysis']['static']['cb_config']
-    json_vars = f"{case['id']}_6_annotation.json"
+    b38_vars = case['variants']['b38']
 
-    # try:
-    #     with open(json_vars, 'r') as reader:
-    #         ann_original = json.load(reader)
+    cb_client_annotation(case['id'], vcf_to_annotate, cb_config)
+    ann_less = condense_annotation(case['id'])
+    ann_final = apply_filters(ann_less, case['reanalysis']['params'], b38_vars)
 
-    # except FileNotFoundError:
-    #     ann_original = cb_client_annotation(vcf_to_annotate, cb_config)
-    #     with open(json_vars, 'w') as writer:
-    #         json.dump(ann_original, writer)
+    case['variants']['final'] = ann_final
 
-    # ann_less = condense_annotation(ann_original)
-    # ann_final = apply_filters(ann_less, case['reanalysis']['params'], b38_pcvs)
-    # case['variants']['final'] = ann_final
-
-    # # create output file
-    # output_fp = f"{dt.now()}_reanalysis_{case_id}.xlsx"
-    # create_excel(case, params, output_fp)
+    # create output file
+    output_fp = f"{case['id']}_reanalysis_{dt.today()}.xlsx"
+    create_excel(case, output_fp)
 
     output_fp = f"{case['id']}_temp_output.json"
     with open(output_fp, 'w') as writer:

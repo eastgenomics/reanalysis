@@ -2,6 +2,8 @@
 *.vcf*
 *.bed
 *.log
+*.xlsx
+*_anno*
 *.tab.*
 *_temp_*
 *_genomic.fna*

@@ -176,7 +176,7 @@ def get_single_case_data(oc, study_id, case_id):
 
 
 def look_at_json(fp):
-    """ Examine the structure of a JSON file.
+    """ Examine the structure and contents of a JSON file.
 
     args:
         fp [str]: path to json file
@@ -187,7 +187,7 @@ def look_at_json(fp):
     with open(fp, 'r') as reader:
         data = json.load(reader)
 
-    info = data['clinical_report'][0]['clinical_report_data']['variants'][0]['reportEvents'][0]
+    info = data
 
     # print(type(info))
     # print(len(info))
@@ -259,128 +259,122 @@ def look_at_100k_cases(cases):
 
 
 def look_at_vcf(vcf):
-    """  """
+    """ Get the number of lines in the header and variant sections of a
+    VCF. Identify all unique values in the CHROM field.
 
-    if vcf.endswith('.gz'):
-        with gzip.open(vcf, "rt") as reader:
-            lines = reader.readlines()
+    args:
+        vcf [str]
 
-    else:
-        with open(vcf, 'r') as reader:
-            lines = reader.readlines()
+    returns:
+        head_count [int]: number of header lines
+        body_count [int]: number of variant (body) lines
+        chroms [list]: unique values in the CHROM field
+    """
 
-    header = []
-    body = []
-    header_lines = 0
-    body_lines = 0
+    head_count = count_vcf_section_lines(vcf, 'header')
+    body_count = count_vcf_section_lines(vcf, 'variant')
+
+    print(f"{vcf} has {head_count} header lines and {body_count} body lines")
+
+    # head_lines = get_vcf_section_lines(vcf, 'header')
+    body_lines = get_vcf_section_lines(vcf, 'variant')
 
     chroms = []
 
-    for line in lines:
-        if line.startswith('#'):
-            header.append(line)
-            header_lines += 1
+    for line in body_lines:
+        chrom = re.search(r'^(.*?)\t', line)
 
-        else:
-            body.append(line)
-            body_lines += 1
-
-            split = line.split('\t')
-            chrom = split[0].strip()
-
-            if chrom not in chroms:
-                print(chrom)
-                chroms.append(chrom)
+        if chrom not in chroms:
+            chroms.append(chrom)
 
     chroms.sort()
-    print(f"{vcf} has {len(chroms)} unique CHROM values")
 
-    filename = f'{vcf}_stupid_chromosomes.txt'
+    print(f"{vcf} has {len(chroms)} unique CHROM values: {chroms}")
 
-    with open(filename, 'w') as writer:
-        writer.write(f"{vcf} has {len(chroms)} unique values in CHROM field\n")
-        for chrom in chroms:
-            writer.write(f"{line}\n")
+    return head_count, body_count, chroms
 
 
-def get_variant_lines(vcf_fp):
-    """ Given the path to a VCF file, return a list consisting of the
-    lines describing variants (i.e. the VCF body).
+def get_vcf_section_lines(vcf, section):
+    """ Given the path to a VCF file, return the header or variant lines
+    as a list.
 
     args:
-        vcf_fp [str]
+        vcf [str]
+        section [str]: 'header' or 'variant'
 
     returns:
-        var_lines [list]
+        lines [list]
     """
 
-    vcf_body = subprocess.run(
-        f"bcftools view -H {vcf_fp}",
-        shell=True,
-        capture_output=True,
-        text=True).stdout
+    if section == 'header':
 
-    var_lines = [line.strip() for line in vcf_body.split('\n') if line.strip()]
+        content = subprocess.run(f"bcftools view -h {vcf}",
+            shell=True, capture_output=True, text=True).stdout
 
-    return var_lines
+    elif section == 'variant':
+
+        content = subprocess.run(f"bcftools view -H {vcf}",
+            shell=True, capture_output=True, text=True).stdout
+
+    lines = [line.strip() for line in content.split('\n') if line.strip()]
+
+    return lines
 
 
-def count_variant_lines(vcf_fp):
-    """ Given the path to a VCF file, return the number of variants
-    (i.e. non-header lines).
+def count_vcf_section_lines(vcf, section):
+    """ Given the path to a VCF file, return the number of header or
+    body lines.
 
     args:
-        vcf_fp [str]
+        vcf [str]
+        section [str]: 'header' or 'variant'
 
     returns:
-        var_count [int]
+        count [int]
     """
 
-    result = subprocess.run(
-        f"bcftools view -H {vcf_fp} | wc -l",
-        shell=True,
-        capture_output=True,
-        text=True).stdout
+    if section == 'header':
 
-    count = int(result)
-    print(f"{vcf_fp} contains {count} variants")
+        content = subprocess.run(f"bcftools view -h {vcf} | wc -l",
+            shell=True, capture_output=True, text=True).stdout
+
+    elif section == 'variant':
+
+        content = subprocess.run(f"bcftools view -H {vcf} | wc -l",
+            shell=True, capture_output=True, text=True).stdout
+
+    count = int(content)
+    print(f"{vcf} has {count} {section} lines")
 
     return count
 
 
-def cb_client_annotation(output, input):
+def cb_client_annotation(input, output_json):
     """ Use the CB client to retrieve variant information """
 
-    t_start = dt.now()
-    print(f'{t_start} Retrieving variant annotation using CB client')
+    variants = input  # call using chrom:pos:ref:alt for single variant
+    # variants = create_variant_list(input)
 
-    variants = create_variant_list(input)
-
-    cc = ConfigClient("config.json")
+    cc = ConfigClient("resources/cb_config.json")
     cbc = CellBaseClient(cc)
     var_client = cbc.get_variant_client()
 
-    # var_info = var_client.get_annotation(single_var_1)
-
     var_info = var_client.get_annotation(variants, include=[
-        # 'conservation',
-        # 'cytoband',
-        'functionalScore',
-        'geneConstraints',
-        # 'hgvs',
-        # 'variation',  # 'id'
-        'populationFrequencies',  # 'populationFrequencies' and 'id'
-        'consequenceType',  # 'consequenceTypes' and 'displayConsequenceType'
-        # 'mirnaTargets',  # 'geneMirnaTargets'
-        'geneDisease', ])  # 'geneTraitAssociation'
-        # 'drugInteraction'])  # 'geneDrugInteraction'
+        'conservation', 'geneConstraints', 'functionalScore',
+        'consequenceType', 'populationFrequencies'])
 
-    with open(output, 'w') as writer:
+        # options for 'include':
+
+        # 'hgvs', 'cytoband', 'conservation', 'geneConstraints',
+        # 'functionalScore', 'variation' (='id'),
+        # 'mirnaTargets' (='geneMirnaTargets'),
+        # 'geneDisease' (='geneTraitAssociation')
+        # 'drugInteraction' (='geneDrugInteraction'),
+        # 'populationFrequencies' (= 'populationFrequencies' + 'id')
+        # 'consequenceType' (= 'consequenceTypes' + 'displayConsequenceType')
+
+    with open(output_json, 'w') as writer:
         json.dump(var_info, writer)
-
-    t_end = dt.now()
-    t_diff = t_end - t_start
-    print(f'Annotation data retrieval took {t_diff}')
 
     return var_info
 
@@ -873,30 +867,49 @@ def get_case_gene_list(case_id, json_fp):
 
 def test_vcf_regex(vcf):
 
-    var_line_count = count_variant_lines(vcf)
+    print('Getting variant line contents with bcftools...')
 
     var_list = []
-    lines = get_variant_lines(vcf)
+    lines = get_vcf_section_lines(vcf, 'variant')
+
+    print('Processing variant coordinates using regex...')
 
     for line in lines:
 
-        chrom_pos = re.findall(r'^(.*?)\t(.*?)\t', line)  # fields 0,1
-        ref_alt = re.findall(r'\t([ACGNT]*)\t([ACGNT]*)\t', line)  # fields 3,4
+        c_p = re.search(r'^(.*?)\t(.*?)\t', line).groups()  # chrom & pos
+        r_a = re.search(r'\t([ACGT]*)\t([ACGT]*)\t', line).groups()  # ref & alt
 
-        for strings in chrom_pos, ref_alt:
+        for strings in c_p, r_a:
+            assert len(strings) == 2, \
+                f"variant regex: should be (field1, field2) but got {strings}"
 
-            assert len(strings) == 1, \
-                f"variant regex error 1: {strings} list length != 1"
-
-            assert len(strings[0]) == 2, \
-                f"variant regex error 1: {strings} tuple length != 2"
-
-        variant = f"{chrom_pos[0][0]}:{chrom_pos[0][1]}:{ref_alt[0][0]}:{ref_alt[0][1]}"
+        variant = f"{c_p[0]}:{c_p[1]}:{r_a[0]}:{r_a[1]}"
 
         var_list.append(variant)
         print(variant)
 
-    print(f'{len(var_list)} variants output')
+    print(f'regex found {len(var_list)} variants in {vcf}')
+
+
+def get_all_refalt_chars(vcf):
+    """ Identify all unique characters used in the REF or ALT fields of
+    a VCF """
+
+    chars = []
+
+    var_lines = get_vcf_section_lines(vcf, 'variant')
+
+    for line in var_lines:
+        split = line.split('\t')
+        ref = split[3]
+        alt = split[4]
+
+        for value in ref, alt:
+            for char in value:
+                if char not in chars:
+                    chars.append(char)
+
+    print(f'Unique REF/ALT characters in {vcf}: {chars}')
 
 
 def main():
@@ -925,18 +938,39 @@ def main():
 
     json_input_1 = 'InterpretationDetail_caseID_Page9_SAP-32023-1__irId=32023__irVersion1_.json'
     json_output_1 = 'SAP-32023-1_temp_output.json'
-    vcf_1 = 'SAP-32023-1_5_sorted_proband.vcf.gz'
+    json_anno_1 = 'SAP-32023-1_annotation_group_4.json'
+    vcf_1a = 'SAP-32023-1_1_sorted_proband.vcf.gz'
+    vcf_1b = 'SAP-32023-1_2_normalised_proband.vcf.gz'
+    vcf_1c = 'SAP-32023-1_3_renamed_proband.vcf.gz'
+    vcf_1d = 'SAP-32023-1_4_tagged_proband.vcf.gz'
+    vcf_1e = 'SAP-32023-1_6_filtered_proband.recode.vcf'
+    vcf_1f = 'SAP-32023-1_7_sorted_proband.vcf.gz'
 
     json_input_2 = 'InterpretationDetail_caseID_Page9_SAP-33169-1__irId=33169__irVersion1_.json'
     json_output_2 = 'SAP-33169-1_temp_output.json'
 
-    look_at_json(json_input_1)
-    # look_at_100k_cases(case_list)
+    vcfs = [vcf_1f, vcf_1e, vcf_1d, vcf_1c, vcf_1b, vcf_1a]
+
+    # get_variant_lines()
     # look_at_vcf(vcf)
-    # look_at_vcf(b37_vcf)
+
+    look_at_json(json_anno_1)
+
+    # look_at_100k_cases(case_list)
     # process_cases_summary('summary_data_all_cases.json')
+
+    # cb_client_annotation('7:117199533:G:A', output_json)
+
     # genes = get_case_gene_list('SAP-32023-1', json_1)
-    # test_vcf_regex(vcf_1)
+
+    # for vcf in vcfs:
+    #     print(f"\nProcessing {vcf}\n")
+    #     print('Counting variant lines with bcftools...')
+    #     count_vcf_section_lines(vcf, 'variant')
+    #     test_vcf_regex(vcf)
+
+    # test_vcf_regex(vcf_1f)
+    # get_all_refalt_chars(vcf_1f)
 
 
 if __name__ == '__main__':
