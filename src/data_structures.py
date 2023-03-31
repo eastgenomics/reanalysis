@@ -187,7 +187,7 @@ def look_at_json(fp):
     with open(fp, 'r') as reader:
         data = json.load(reader)
 
-    info = data
+    info = data['clinical_report'][0]['clinical_report_data']['variants']
 
     # print(type(info))
     # print(len(info))
@@ -199,32 +199,35 @@ def look_at_json(fp):
     # # IF YOU JUST WANT TO PRINT THE WHOLE THING
     # print(info)
 
-    # IF YOU'RE LOOKING AT A DICT
-    for key, value in info.items():
+    # # IF YOU'RE LOOKING AT A DICT
+    # for key, value in info.items():
 
-    # # IF YOU'RE LOOKING AT A LIST OF DICTS
-    # for dict in info:
-    #     for key, value in dict.items():
+    # IF YOU'RE LOOKING AT A LIST OF DICTS
+    for dict in info:
+        for key, value in dict.items():
 
-        # indent for lists of dicts, deindent for dicts
+            if key == 'reportEvents':
+                print(value)
 
-        if type(value) in types:
-            print(f'{key}: {value} [{type(value)}]')
+        # # indent for lists of dicts, deindent for dicts
 
-        elif type(value) == dict:
-            if len(value) == 0:
-                print(f'{key} [empty dict]')
-            else:
-                print(f'{key} [{type(value)}]')
+        # if type(value) in types:
+        #     print(f'{key}: {value} [{type(value)}]')
 
-        elif type(value) == list:
-            if len(value) == 0:
-                print(f'{key} [empty list]')
-            else:
-                print(f'{key} [list of {len(value)} {type(value[0])}]')
+        # elif type(value) == dict:
+        #     if len(value) == 0:
+        #         print(f'{key} [empty dict]')
+        #     else:
+        #         print(f'{key} [{type(value)}]')
 
-        else:
-            print(f'{key} [{type(value)}]')
+        # elif type(value) == list:
+        #     if len(value) == 0:
+        #         print(f'{key} [empty list]')
+        #     else:
+        #         print(f'{key} [list of {len(value)} {type(value[0])}]')
+
+        # else:
+        #     print(f'{key} [{type(value)}]')
 
 
 def look_at_100k_cases(cases):
@@ -954,7 +957,7 @@ def main():
     # get_variant_lines()
     # look_at_vcf(vcf)
 
-    look_at_json(json_anno_1)
+    look_at_json(json_input_1)
 
     # look_at_100k_cases(case_list)
     # process_cases_summary('summary_data_all_cases.json')
