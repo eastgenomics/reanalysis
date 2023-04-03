@@ -387,11 +387,14 @@ def setup_case_dict(json_data, params, static, date):
         'reanalysis': {
             'date': date,
             'params': params,
-            'static': static},
+            'static': static,
+            'used_affection': False,
+            'used_de_novo': False,},
         'panels':{},
         'variants': {
             'original': {},
             'b38': [],
+            'de_novo': [],
             'final': {}}}
 
     return case
@@ -445,6 +448,17 @@ def get_family_info(json_data, case):
             else:
                 relation = person['additionalInformation'][
                     'relation_to_proband'].lower()
+
+                # there can be more than 1 of a relation, eg multiple siblings
+
+                if relation in case['family']['adopted'].keys():
+
+                    if len(relation.split('_')) == 1:
+                        relation += '_2'
+
+                    elif len(relation.split('_')) == 2:
+                        count = int(relation.split('_')[1])
+                        relation += f'_{count + 1}'
 
             if relation == 'unrelated':
                 continue  # don't use data for unrelated individuals
@@ -545,8 +559,6 @@ def get_current_panels(case):
         info['retrieved_data'] = None
         info['current_genes'] = None
         info['current_regions'] = None
-
-        print(f"Retrieving panel {panel_id}: {info['original_name']}")
 
         panel_data = get_panelapp_panel(panel_id)
 
@@ -984,45 +996,158 @@ def filter_on_bed(input_vcf, output_prefix, bed, params):
 
 
 @time_execution
-def filter_on_affection(case):
+def family_filtering(case, output_dir):
+
+    # check the proband is not adopted, and at least one other vcf is available
+
+    if not case['family']['adopted']['proband']:
+        if len(case['family']['vcfs']['original']) > 1:
+
+            # de novo filter: both parent VCFs present, both parents unaffected
+
+            m_vcf = case['family']['vcfs']['original'].get('mother')
+            f_vcf = case['family']['vcfs']['original'].get('father')
+
+            m_affected = case['family']['affected'].get('mother')
+            f_affected = case['family']['affected'].get('father')
+
+            if m_vcf and f_vcf:
+                if (m_affected == 'False') and (f_affected == 'False'):
+
+                    print('Performing de novo analysis')
+
+                    for relation in 'mother', 'father':
+                        case = process_single_individual(
+                            case, relation, output_dir)
+
+                    case = identify_de_novo(case, output_dir)
+
+                else:
+                    print('Not performing de novo analysis - at least '
+                        'one parent is affected.')
+            else:
+                print("Not performing de novo analysis - at least "
+                        "one parent's VCF is unavailable.")
+
+            # affection filter: identify variants in all affected individuals
+
+            vcfs = ""
+
+            for relation in case['family']['vcfs']['original'].keys():
+
+                # identify (non-proband) affected relatives
+
+                if (relation != 'proband') and \
+                    (case['family']['affected'][relation] == 'True'):
+
+                    # use their vcf if they're not adopted, or are a parent
+
+                    if (not case['family']['adopted'][relation]) or \
+                        (relation in ['mother', 'father']):
+
+                        case = process_single_individual(
+                            case, relation, output_dir)
+
+                        vcfs += f" {case['family']['vcfs']['filtered'][relation]}"
+
+            if vcfs:
+                print('Performing affection analysis')
+                case = filter_on_affection(case, vcfs, output_dir)
+
+            else:
+                print('Not performing affection analysis - no other '
+                    'affected family members.')
+        else:
+            print('Not using family data - no other family VCFs.')
+    else:
+        print('Not using family data - proband is adopted.')
+
+    return case
+
+
+def filter_on_affection(case, vcfs, output_dir):
     """ Uses bedtools intersect to identify variants present in the VCFs
     of all affected family members.
 
     args:
         case [dict]
+        vcfs [str]: in form "<fp 1> <fp 2> ... <fp N>"
 
     returns:
         case [dict]: paths of VCFs filtered on segregation added
     """
 
-    initial_vcf = case['family']['vcfs']['filtered']['proband']
-    output_filename = f"{case['id']}_intersect.vcf.gz"
+    case['family']['vcfs']['intersect_affected'] = None
+    p_vcf = case['family']['vcfs']['filtered']['proband']
+    output_fp = f"{output_dir}{case['id']}_intersect_affected.vcf.gz"
 
-    # don't use family filtering if proband is adopted
+    # get intersection vcf for all affected individuals
 
-    if not case['family']['adopted']['proband']:
-        for member, member_vcf in case['family']['vcfs']['filtered'].items():
+    if not os.path.exists(output_fp):
 
-            # don't bother intersecting the proband's vcf against itself
+        print("Intersecting proband and affected relation VCFs")
 
-            if member == 'proband':
-                pass
+        subprocess.run(
+            f"bedtools intersect -u -header -a {p_vcf} -b {vcfs} " \
+            f"| gzip > {output_fp}",
+            shell=True)
 
-            # perform intersect on each available vcf in turn
+    else:
+        print(f"Skipping intersect step ({output_fp} already exists)")
 
-            elif (case['family']['affected'][member] == 'True') and \
-                not case['family']['adopted'][member]:
+    # update case dict
 
-                output_filename = (output_filename[:-7] + f"_{member}.vcf.gz")
+    if os.path.exists(output_fp):
+        case['family']['vcfs']['intersect_affected'] = output_fp
+        case['reanalysis']['used_affection'] = True
 
-                subprocess.run(
-                    f"bedtools intersect -a {initial_vcf} -b {member_vcf} " \
-                    f"| gzip > {output_filename}",
-                    shell=True)
+    return case
 
-                initial_vcf = output_filename
 
-    case['family']['vcfs']['intersect'] = output_filename
+def identify_de_novo(case, output_dir):
+    """  """
+
+    case['variants']['de_novo'] = None
+    case['family']['vcfs']['intersect_de_novo'] = None
+
+    vcfs = case['family']['vcfs']['filtered']
+    output_fp = f"{output_dir}{case['id']}_intersect_de_novo.vcf.gz"
+
+    # get or create inverse intersection of proband and parent vcfs
+
+    if not os.path.exists(output_fp):
+
+        print('Getting inverse intersection of proband and parent vcfs')
+
+        subprocess.run(
+            f"bedtools intersect -v -header " \
+            f"-a {vcfs['proband']} -b {vcfs['mother']} {vcfs['father']} " \
+            f"| gzip > {output_fp}",
+            shell=True)
+
+    else:
+        print(f"Skipping intersect step ({output_fp} already exists)")
+
+    # update the case dict
+
+    if os.path.exists(output_fp):
+
+        de_novo = []
+
+        lines = get_vcf_section_lines(output_fp, 'variant')
+
+        for line in lines:
+            split = line.split('\t')
+            var_id = f"{split[0]}:{split[1]}:{split[3]}:{split[4]}"
+
+            if var_id not in de_novo:
+                de_novo.append(var_id)
+
+        print(f"{len(de_novo)} de novo variants identified: {de_novo}")
+
+        case['family']['vcfs']['intersect_de_novo'] = output_fp
+        case['reanalysis']['used_de_novo'] = True
+        case['variants']['de_novo'] = de_novo
 
     return case
 
@@ -1140,7 +1265,7 @@ def split_large_vcfs(case_id, vcf, anno_dir):
 
     # split variants into subgroups
 
-    print('Splitting variants into subgroups...')
+    print('Identifying variants to annotate...')
 
     lines = get_vcf_section_lines(vcf, 'variant')
 
@@ -1245,7 +1370,8 @@ def condense_annotation(variants):
             'scaled_cadd': None,
             'transcripts': None,
             'original': False,
-            'reanalysis': False}
+            'reanalysis': False,
+            'de_novo': 'Unknown'}
 
         # get allele frequency (global gnomAD AF)
 
@@ -1380,16 +1506,13 @@ def annotation_processing(case_id, vcf, cb_config, output_dir):
 
             get_annotation(i, vars_fp, anno_fp, cb_config)
 
-        ann_vars = combine_files(case_id, anno_dir, output_fp)
-
-    else:
-        print(f"Skipping annotation ({output_fp} already exists)")
+    ann_vars = combine_files(case_id, anno_dir, output_fp)
 
     return ann_vars
 
 
 @time_execution
-def apply_filters(params, all_vars, original_vars):
+def apply_filters(case, all_vars):
     """ Given annotated variant data and a set of filtering parameters,
     return only the variants which meet filtering thresholds.
 
@@ -1402,6 +1525,8 @@ def apply_filters(params, all_vars, original_vars):
         output_vars [list]: variants after filtering on annotation
     """
 
+    params = case['reanalysis']['params']
+    original_vars = case['variants']['b38']
     output_vars = []
 
     consequences = ['SO:0001893', 'SO:0001574', 'SO:0001575',
@@ -1427,15 +1552,29 @@ def apply_filters(params, all_vars, original_vars):
 
         if not var['gnomad_af'] or (var['gnomad_af'] <= params['max_af']):
 
+            # rare de novo variants are always included
+
+            if var['id'] in case['variants']['de_novo']:
+
+                var['de_novo'] = 'True'
+                var['reanalysis'] = True
+
+            elif case['family']['vcfs'].get('intersect_de_novo') and \
+                (var['id'] not in case['variants']['de_novo']):
+
+                var['de_novo'] = 'False'
+
             # filter 2: high/medium consequence type
 
             for cons in var['consequences']:
                 if (cons[1] in consequences):
 
+                    # filter 3 (non-SNVs only): AF or CADD required
+
                     if not snv and (var['gnomad_af'] or var['scaled_cadd']):
                         var['reanalysis'] = True
 
-                    # filter 3 (SNVs only): high scaled cadd score
+                    # filter 4 (SNVs only): high scaled CADD score
 
                     elif snv:
                         if not var['scaled_cadd']:
@@ -1481,7 +1620,7 @@ def create_excel(case, output_fp):
         startcol=col,
         header=False)
 
-    row += 7
+    row += 9
 
     df_dict['param_df'].to_excel(
         writer,
@@ -1535,12 +1674,11 @@ def create_dfs(case):
         'reanalysis_date': case['reanalysis']['date'],
         'case_id': case['id'],
         'disorders': case['disorders'],
-        'required_liftover': False,
+        'original_ref_genome': case['assembly'],
+        'used_de_novo': case['reanalysis']['used_de_novo'],
+        'used_affection': case['reanalysis']['used_affection'],
         'solved_fully': case['solved']['fully'],
         'solved_partially': case['solved']['partially']}
-
-    if case['assembly'].lower() == 'grch37':
-        summary['required_liftover'] = True
 
     # define family info df
 
@@ -1558,7 +1696,7 @@ def create_dfs(case):
     # define variant df
 
     vars = {'id': [], 'consequences': [], 'gnomad_af': [], 'scaled_cadd': [],
-        'transcripts': [], 'reanalysis': [], 'original': [], 'acmg': [],
+        'transcripts': [], 'de_novo': [], 'reanalysis': [], 'original': [], 'acmg': [],
         'tier': [], 'explains_phenotype': [], 'clinvar_rank': [],
         'clinvar_status': []}
 
@@ -1568,6 +1706,7 @@ def create_dfs(case):
         vars['gnomad_af'].append(var['gnomad_af'])
         vars['scaled_cadd'].append(var['scaled_cadd'])
         vars['transcripts'].append(var['transcripts'])
+        vars['de_novo'].append(var['de_novo'])
 
         for key in 'reanalysis', 'original':
             if var[key]:
@@ -1657,10 +1796,10 @@ def format_workbook(output_fp):
         ws1[f'A{row}'].style = header_font
 
     for col in 'ABC':
-        ws1[f'{col}14'].style = header_font
+        ws1[f'{col}16'].style = header_font
         ws1.column_dimensions[col].width = 20
 
-    for col in 'ABCDEFGHIJKL':
+    for col in 'ABCDEFGHIJKLM':
         ws2[f'{col}1'].style = header_font
         ws2.column_dimensions[col].width = 20
 
@@ -1776,39 +1915,25 @@ def process_case(case, output_dir, use_family):
 
     case = process_single_individual(case, 'proband', output_dir)
 
-    vcf_to_annotate = case['family']['vcfs']['filtered']['proband']
-    cb_config = case['reanalysis']['static']['cb_config']
-    b38_vars = case['variants']['b38']
+    to_annotate = case['family']['vcfs']['filtered']['proband']
 
-    # optionally process family vcfs and intersect vcfs
+    # use family data (assuming proband not adopted & 1+ other vcf available)
 
     if use_family:
-        for relation in case['family']['vcfs']['original'].keys():
 
-            # only process vcfs for affected individuals who aren't adopted
+        case = family_filtering(case, output_dir)
 
-            if (relation != 'proband'):
-                if (case['family']['affected'][relation] == 'True'):
-                    if not case['family']['adopted'][relation]:
-
-                        case = process_single_individual(case, relation)
-
-                    else:
-                        print(f"{relation} VCF excluded (adopted)")
-                else:
-                    print(f"{relation} VCF excluded (not affected)")
-
-        if len(case['family']['vcfs']['filtered'].keys()) > 1:
-
-            case = filter_on_affection(case)
-            vcf_to_annotate = case['family']['vcfs']['intersect']
+        if case['reanalysis']['used_affection'] == True:
+            to_annotate = case['family']['vcfs']['intersect_affected']
 
     # get variant annotations and use them to filter variants
 
-    ann_vars = annotation_processing(
-        case['id'], vcf_to_annotate, cb_config, output_dir)
+    cb_config = case['reanalysis']['static']['cb_config']
 
-    ann_final = apply_filters(case['reanalysis']['params'], ann_vars, b38_vars)
+    ann_vars = annotation_processing(
+        case['id'], to_annotate, cb_config, output_dir)
+
+    ann_final = apply_filters(case, ann_vars)
 
     case['variants']['final'] = ann_final
 
@@ -1819,6 +1944,7 @@ def process_case(case, output_dir, use_family):
 
 
 def main():
+
     # define filtering parameters and static files
 
     static = {
