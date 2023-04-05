@@ -858,8 +858,8 @@ def process_single_individual(case, relation, output_dir):
 
     # standardise vcf
 
+    bgzip_vcf(vcf)
     sort_vcf(vcf, sorted_vcf_1)
-    bgzip_vcf(sorted_vcf_1)
     normalise_vcf(sorted_vcf_1, normalised_vcf)
     rename_vcf_chroms(normalised_vcf, renamed_vcf, static['chrom_map'])
 
@@ -921,6 +921,18 @@ def process_single_individual(case, relation, output_dir):
 
 
 @time_execution
+def bgzip_vcf(vcf):
+    """ Un-gzip a vcf, then bgzip it.
+
+    args:
+        vcf [str]
+    """
+
+    subprocess.run(f"gunzip {vcf}", shell=True)
+    subprocess.run(f"bgzip {vcf[:-3]}", shell=True)
+
+
+@time_execution
 def sort_vcf(input_vcf, output_vcf):
     """ Use bcftools to sort a VCF file.
 
@@ -935,18 +947,6 @@ def sort_vcf(input_vcf, output_vcf):
 
     else:
         print(f'Skipping sorting ({output_vcf} already exists)')
-
-
-@time_execution
-def bgzip_vcf(vcf):
-    """ Un-gzip a vcf, then bgzip it.
-
-    args:
-        vcf [str]
-    """
-
-    subprocess.run(f"gunzip {vcf}", shell=True)
-    subprocess.run(f"bgzip {vcf[:-3]}", shell=True)
 
 
 @time_execution
@@ -1016,11 +1016,11 @@ def filter_on_bed(input_vcf, output_prefix, bed, params):
         subprocess.run(
             f"vcftools {file_type} {input_vcf} " \
             f"--bed {bed} " \
-            f"--remove-filtered-all " \
+            f"--remove-filtered-all" \
             f"--minQ {params['min_qual']} " \
             f"--minGQ {params['min_gq']} " \
             f"--minDP {params['min_depth']} " \
-            f"--recode --recode-INFO-all " \
+            f"--recode --recode-INFO-all" \
             f"--out {output_prefix}",
             shell=True)
 
