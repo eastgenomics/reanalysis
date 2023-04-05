@@ -4,7 +4,7 @@ import os
 import re
 import gzip
 import json
-import statistics
+import statistics as s
 import subprocess
 
 from datetime import datetime as dt
@@ -726,85 +726,28 @@ def get_cases_summary():
 
 def process_cases_summary(file):
 
-    output = {
-        'assembly': {
-            'b37': 0,
-            'b38': 0,
-            'other': []},
-        'panels': [],
-        'solved': {
-            'not_p_or_f': [],
-            'p_only': [],
-            'f_only': [],
-            'p_and_f': []},
-        'variants': {
-            'all_cases': [],
-            'not_p_or_f': [],
-            'p_only': [],
-            'f_only': [],
-            'p_and_f': []}}
-
     with open(file, 'r') as reader:
-        dict = json.load(reader)
+        data = json.load(reader)
 
-    # print(f"There are {dict['assembly']['b37']} b37 and {dict['assembly']['b38']} b38 cases")
-    # print(f"Overall, the mean number of potential causal variants per case is {statistics.mean(dict['variants']['all_cases'])}")
+    # panels data is a list of lists
 
-    # for key, case_list in dict['solved'].items():
+    for group, group_data in data['panels'].items():
 
-    #     cases = dict['solved'][key]
-    #     vars = dict['variants'][key]
-    #     filename = f"case_list_{key}.txt"
+        group_size = len(group_data)
+        panel_counts = [len(panel_list) for panel_list in group_data]
 
-    #     if vars:
-    #         print(f"There are {len(cases)} {key} cases. {len(vars)} have potential causal variants. The average number of variants is {statistics.mean(vars)}.")
-    #     else:
-    #         print(f"There are {len(cases)} {key} cases. {len(vars)} have potential causal variants.")
+        if panel_counts:
 
-    #     with open(filename, 'w') as writer:
-    #         for case in case_list:
-    #             writer.write(f"{case}\n")
+            maxi = max(panel_counts)
+            mini = min(panel_counts)
+            mean = s.mean(panel_counts)
+            median = s.median(panel_counts)
+            stdev = s.stdev(panel_counts)
 
-    panels_count = {}
+            print(f"panels ({group}): {group_size} cases, max {maxi}, min {mini}, mean {mean}, median {median}, stdev {stdev}")
 
-    for panel in dict['panels']:
-        id = panel['id']
-        name = panel['name']
-        version = panel['version']
-
-        # panel id in output dict
-        if id in panels_count.keys():
-            panels_count[id]['count'] += 1
-
-            # panel version in id dict
-            if version in panels_count[id].keys():
-                panels_count[id][version]['count'] += 1
-
-                # panel name in version dict
-                if name in panels_count[id][version]['conditions'].keys():
-                    panels_count[id][version]['conditions'][name] += 1
-
-                # panel name not in version dict
-                elif name not in panels_count[id][version]['conditions'].keys():
-                    panels_count[id][version]['conditions'][name] = 1
-
-            # panel version not in id dict
-            elif version not in panels_count[id].keys():
-                panels_count[id][version] = {'count': 1, 'conditions': {name: 1}}
-
-        # panel id not in output dict
-        elif id not in panels_count.keys():
-            panels_count[id] = {'count': 1, version: {'count': 1, 'conditions': {name: 1}}}
-
-    with open('panels_summary.txt', 'w') as writer:
-        for panel_id, id_value in panels_count.items():
-            writer.write(f"Panel {panel_id} ({id_value['count']} uses)\n")
-            for key, value in id_value.items():
-                if key != 'count':
-                    writer.write(f"\tVersion {key} ({value['count']} uses)\n")
-                    for cond, count in value['conditions'].items():
-                        writer.write(f"\t\t{cond} ({count} uses)\n")
-            writer.write("\n")
+        else:
+            print(f"panels ({group}): empty")
 
 
 def get_panelapp_panel(panel_id, panel_version=None):
@@ -915,6 +858,59 @@ def get_all_refalt_chars(vcf):
     print(f'Unique REF/ALT characters in {vcf}: {chars}')
 
 
+def temp_function(arg):
+
+    with open(arg, 'r') as reader:
+        data = json.load(reader)
+
+    # panels and variant data are lists of lists
+
+    for feature in 'panels', 'variants':
+        for group, group_data in data[feature].items():
+
+            group_size = len(group_data)
+            counts = [len(group_list) for group_list in group_data]
+
+            if counts:
+                maxi = max(counts)
+                mini = min(counts)
+                mean = s.mean(counts)
+                median = s.median(counts)
+                stdev = s.stdev(counts)
+                print(f"{feature} ({group}): {group_size} cases, "
+                    f"max {maxi}, min {mini}, mean {mean}, "
+                    f"median {median}, stdev {stdev}")
+
+            else:
+                print(f"{feature} ({group}): empty")
+
+    # family data are lists of dicts
+
+    for group, group_data in data['family'].items():
+
+        group_size = len(group_data)
+
+        counts = [fam['vcf_count'] for fam in group_data]
+
+        both_parents = 0
+        for fam in group_data:
+            if fam['both_parents']:
+                both_parents += 1
+
+        if counts:
+            maxi = max(counts)
+            mini = min(counts)
+            mean = s.mean(counts)
+            median = s.median(counts)
+            stdev = s.stdev(counts)
+            print(f"family ({group}): ({group}): {group_size} cases, "
+                f"max {maxi}, min {mini}, mean {mean}, "
+                f"median {median}, stdev {stdev}")
+
+        else:
+            print(f"family ({group}): empty")
+
+
 def main():
     """ Reference data """
 
@@ -957,10 +953,11 @@ def main():
     # get_variant_lines()
     # look_at_vcf(vcf)
 
-    look_at_json(json_input_1)
+    # look_at_json(json_input_1)
 
     # look_at_100k_cases(case_list)
-    # process_cases_summary('summary_data_all_cases.json')
+    # process_cases_summary('summary_data_all_cases_noreally.json')
+    temp_function('summary_data_all_cases_noreally.json')
 
     # cb_client_annotation('7:117199533:G:A', output_json)
 
