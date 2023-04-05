@@ -724,30 +724,158 @@ def get_cases_summary():
         json.dump(output, writer)
 
 
+def get_de_novo_summary():
+
+    case_count = 0
+
+    both_parents = {
+        'true': {'all': 0, 'unsolved': 0, 'partial': 0, 'full': 0},
+        'false': {'all': 0, 'unsolved': 0, 'partial': 0, 'full': 0}}
+
+    for file in os.listdir():
+        if file.endswith('.json'):
+            with open(file, 'r') as reader:
+                data = json.load(reader)
+
+            # look at jsons for all rare disease cases
+
+            if data['program'].lower() == 'rare_disease':
+
+                case_count += 1
+
+                m_vcf = False
+                f_vcf = False
+                solved_f = False
+                solved_p = False
+
+                # identify whether both parent vcfs are there
+
+                req_data = data.get('interpretation_request_data')
+                if req_data:
+                    request = req_data.get('json_request')
+                    if request:
+                        pedigree = request.get('pedigree')
+                        if pedigree:
+                            family = pedigree.get('members')
+
+                            for member in family:
+                                relation = None
+
+                                more_info = member.get('additionalInformation')
+                                if more_info:
+                                    relation = more_info.get('relation_to_proband')
+
+                                if (relation == 'mother') or (relation == 'father'):
+
+                                    samples = [s.get('sampleId') \
+                                        for s in member.get('samples') \
+                                        if s.get('product') == 'DNA']
+
+                                    if samples:
+                                        for vcf in request.get('vcfs'):
+                                            for sample in samples:
+                                                if sample in vcf.get('sampleId'):
+                                                    has_vcf = True
+
+                                    if has_vcf and (relation == 'mother'):
+                                        m_vcf = True
+                                    elif has_vcf and (relation == 'father'):
+                                        f_vcf = True
+
+                # identify whether case is solved
+
+                for report in data.get('clinical_report'):
+                    if report.get('valid'):
+                        ques = report.get('exit_questionnaire')
+                        if ques:
+                            ques_data = ques.get('exit_questionnaire_data')
+                            if ques_data:
+                                qs = ques_data.get('familyLevelQuestions')
+                                if qs:
+                                    solved = qs.get('caseSolvedFamily')
+
+                                    if solved == 'yes':
+                                        solved_f = True
+                                        solved_p = True
+
+                                    elif solved == 'unknown':
+                                        solved_p = True
+
+                # update output
+
+                if m_vcf and f_vcf:
+                    both_parents['true']['all'] += 1
+                    if solved_f:
+                        both_parents['true']['full'] += 1
+                    elif solved_p:
+                        both_parents['true']['partial'] += 1
+                    else:
+                        both_parents['true']['unsolved'] += 1
+
+                else:
+                    both_parents['false']['all'] += 1
+                    if solved_f:
+                        both_parents['false']['full'] += 1
+                    elif solved_p:
+                        both_parents['false']['partial'] += 1
+                    else:
+                        both_parents['false']['unsolved'] += 1
+
+    print(f"{case_count} cases scanned")
+    print(both_parents)
+
+
 def process_cases_summary(file):
 
     with open(file, 'r') as reader:
         data = json.load(reader)
 
-    # panels data is a list of lists
+    # panels and variant data are lists of lists
 
-    for group, group_data in data['panels'].items():
+    for feature in 'panels', 'variants':
+        for group, group_data in data[feature].items():
+
+            group_size = len(group_data)
+            counts = [len(group_list) for group_list in group_data]
+
+            if counts:
+                maxi = max(counts)
+                mini = min(counts)
+                mean = s.mean(counts)
+                median = s.median(counts)
+                stdev = s.stdev(counts)
+                print(f"{feature} ({group}): {group_size} cases, "
+                    f"max {maxi}, min {mini}, mean {mean}, "
+                    f"median {median}, stdev {stdev}")
+
+            else:
+                print(f"{feature} ({group}): empty")
+
+    # family data are lists of dicts
+
+    for group, group_data in data['family'].items():
 
         group_size = len(group_data)
-        panel_counts = [len(panel_list) for panel_list in group_data]
 
-        if panel_counts:
+        counts = [fam['vcf_count'] for fam in group_data]
 
-            maxi = max(panel_counts)
-            mini = min(panel_counts)
-            mean = s.mean(panel_counts)
-            median = s.median(panel_counts)
-            stdev = s.stdev(panel_counts)
+        both_parents = 0
+        for fam in group_data:
+            if fam['both_parents']:
+                both_parents += 1
 
-            print(f"panels ({group}): {group_size} cases, max {maxi}, min {mini}, mean {mean}, median {median}, stdev {stdev}")
+        if counts:
+            maxi = max(counts)
+            mini = min(counts)
+            mean = s.mean(counts)
+            median = s.median(counts)
+            stdev = s.stdev(counts)
+            print(f"family ({group}): ({group}): {group_size} cases, "
+                f"max {maxi}, min {mini}, mean {mean}, "
+                f"median {median}, stdev {stdev}")
 
         else:
-            print(f"panels ({group}): empty")
+            print(f"family ({group}): empty")
 
 
 def get_panelapp_panel(panel_id, panel_version=None):
@@ -858,59 +986,6 @@ def get_all_refalt_chars(vcf):
     print(f'Unique REF/ALT characters in {vcf}: {chars}')
 
 
-def temp_function(arg):
-
-    with open(arg, 'r') as reader:
-        data = json.load(reader)
-
-    # panels and variant data are lists of lists
-
-    for feature in 'panels', 'variants':
-        for group, group_data in data[feature].items():
-
-            group_size = len(group_data)
-            counts = [len(group_list) for group_list in group_data]
-
-            if counts:
-                maxi = max(counts)
-                mini = min(counts)
-                mean = s.mean(counts)
-                median = s.median(counts)
-                stdev = s.stdev(counts)
-                print(f"{feature} ({group}): {group_size} cases, "
-                    f"max {maxi}, min {mini}, mean {mean}, "
-                    f"median {median}, stdev {stdev}")
-
-            else:
-                print(f"{feature} ({group}): empty")
-
-    # family data are lists of dicts
-
-    for group, group_data in data['family'].items():
-
-        group_size = len(group_data)
-
-        counts = [fam['vcf_count'] for fam in group_data]
-
-        both_parents = 0
-        for fam in group_data:
-            if fam['both_parents']:
-                both_parents += 1
-
-        if counts:
-            maxi = max(counts)
-            mini = min(counts)
-            mean = s.mean(counts)
-            median = s.median(counts)
-            stdev = s.stdev(counts)
-            print(f"family ({group}): ({group}): {group_size} cases, "
-                f"max {maxi}, min {mini}, mean {mean}, "
-                f"median {median}, stdev {stdev}")
-
-        else:
-            print(f"family ({group}): empty")
-
-
 def main():
     """ Reference data """
 
@@ -957,7 +1032,6 @@ def main():
 
     # look_at_100k_cases(case_list)
     # process_cases_summary('summary_data_all_cases_noreally.json')
-    temp_function('summary_data_all_cases_noreally.json')
 
     # cb_client_annotation('7:117199533:G:A', output_json)
 

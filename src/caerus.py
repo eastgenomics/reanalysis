@@ -60,7 +60,7 @@ from pycellbase.cbclient import CellBaseClient
 from pycellbase.cbconfig import ConfigClient
 
 
-""" utility functions """
+""" Utility functions """
 
 
 def time_execution(func):
@@ -74,6 +74,55 @@ def time_execution(func):
         print(f'{t_end} {func.__name__} completed, duration: {t_diff}\n')
         return output
     return wrapper
+
+
+def get_cases_list(args):
+    """ Parse the arguments from the call to caerus.py to obtain a list
+    of cases to process.
+
+    args:
+        args [list]: has the value of sys.argv[1:]
+
+    returns:
+        cases [list]: ids of cases to process
+    """
+
+    assert args, \
+        "\nCall to caerus.py requires at least one argument. Examples:\n" \
+        "\tA single case ID\n" \
+        "\tA space-separated list of case IDs\n" \
+        "\tFilepath of a .txt file containing a case ID on each line\n\n" \
+        "Alternatively, use the argument 'all' to process all cases for " \
+        "which files are available in 003_230124_caerus.\n\n" \
+        "Case IDs should include their version, e.g. SAP-55997-1."
+
+    if len(args) == 1:
+
+        # process all cases for which we have a json and at least one vcf
+        if args[0] == 'all':
+
+            subprocess.run('list_project_cases.sh', shell=True)
+
+            with open('usable_project_cases.txt', 'r') as reader:
+                cases = [case.strip() for case in reader.readlines()
+                    if case.strip()]
+
+        # process a list of cases supplied as lines of a text file
+        elif args[0].endswith('.txt'):
+
+            with open(args[0], 'r') as reader:
+                cases = [case.strip() for case in reader.readlines()
+                    if case.strip()]
+
+        # otherwise assume the arg is a single case id
+        else:
+            cases = [args[0]]
+
+    # if there are multiple args, assume they're a list of case ids
+    else:
+        cases = args[0:]
+
+    return cases
 
 
 def generate_date():
@@ -112,209 +161,42 @@ def get_vcf_section_lines(vcf, section):
     return lines
 
 
-def count_vcf_section_lines(vcf, section):
-    """ Given the path to a VCF file, return the number of header or
-    body lines.
+""" Parse case JSON and perform checks """
+
+
+def initialise_case(case_id, params, static, date):
+    """ Coordinate the functions to initialise the object which holds
+    all the relevant case information.
 
     args:
-        vcf [str]: path to input vcf file
-        section [str]: 'header' or 'variant'
+        case_id [str]
+        params [dict]: parameter values to filter variants against
+        static [dict]: paths to static files
+        date [str]: date or reanalysis
 
     returns:
-        count [int]: number of lines in specific vcf section
-    """
-
-    if section == 'header':
-
-        content = subprocess.run(f"bcftools view -h {vcf} | wc -l",
-            shell=True, capture_output=True, text=True).stdout
-
-    elif section == 'variant':
-
-        content = subprocess.run(f"bcftools view -H {vcf} | wc -l",
-            shell=True, capture_output=True, text=True).stdout
-
-    count = int(content)
-    print(f"{vcf} has {count} {section} lines")
-
-    return count
-
-
-def get_panelapp_panel(panel_id, panel_version=None):
-    """ Query the PanelApp API to retrieve data for the specified
-    version of the specified panel. If version is not specified, returns
-    the panel's current version.
-
-    args:
-        panel_id [str]
-        panel_version [str/None]: retrieves current version if None
-
-    returns:
-        result [dict]: all panel data
-    """
-
-    try:
-        result = Panelapp.Panel(str(panel_id), panel_version).get_data()
-
-    # doesn't work for some older panel versions, for various reasons
-
-    except Exception:
-        path = ["panels", str(panel_id)]
-        param = {"version": panel_version}
-        url = api.build_url(path, param)
-        result = api.get_panelapp_response(url)
-
-    return result
-
-
-""" create a bed file """
-
-
-@time_execution
-def create_bed(case, bed_template, bed_output, output_dir):
-    """ Given a set of PanelApp panel IDs, retrieve data for the current
-    versions of those panels and parse out their genes and regions. Use
-    these to create a bed file via the Ensembl BioMart (GRCh38) API.
-    Save this at the location specified by bed_output.
-
-    args:
         case [dict]
-        bed_template [fp]: location of template for api call
-        bed_output [fp]: location to write output bed file to
     """
 
-    # list all unique panel genes and regions
+    json_fp = download_files(case_id)
 
-    all_genes = []
-    regions = []
+    with open(json_fp, 'r') as reader:
+        json_data = json.load(reader)
 
-    for panel_id, info in case['panels'].items():
-        if info['retrieved_data']:
+    check_rd_case(json_data)
 
-            panel_genes = get_panel_genes(info['retrieved_data'])
-            panel_regions = get_panel_regions(info['retrieved_data'])
+    case = setup_case_dict(json_data, params, static, date)
+    case = get_family_info(json_data, case)
+    case = get_original_panels(json_data, case)
+    case = get_current_panels(case)
+    case = get_case_solved_info(json_data, case)
 
-            info['current_genes'] = len(panel_genes)
-            info['current_regions'] = len(panel_regions)
+    check_proband_vcf(case)
 
-            all_genes += panel_genes
+    case_vcfs = case['family']['vcfs']['original']
+    print(f"\nCase: {case_id}\nJSON: {json_fp}\nVCFs: {case_vcfs}")
 
-            if panel_regions:
-                for region in panel_regions:
-                    if region not in regions:
-                        regions.append(region)
-
-    if all_genes:
-        genes = list(set(all_genes))
-
-    assert genes or regions, \
-        f"No current versions of original panels available for {case['id']}"
-
-    print(f"Creating bed: {len(genes)} genes and {len(regions)} regions\n")
-
-    bed_dfs = []
-
-    # retrieve gene positions from ensembl biomart (GRCh38), make dataframes
-
-    if genes:
-
-        if len(genes) > 500:
-            groups = [genes[x:x+500] for x in range(0, len(genes), 500)]
-        else:
-            groups = [genes]
-
-        print(f"Genes processed in {len(groups)} group(s)")
-        temp_bed_file = f'{output_dir}temp_bed_file.bed'
-
-        for gene_group in groups:
-
-            with open(bed_template, 'r') as reader:
-                contents = reader.read()
-
-            hgnc_string = ','.join([ele for ele in gene_group])
-            query = contents.replace('PLACEHOLDER', hgnc_string)
-
-            subprocess.run(['wget', '-O', temp_bed_file, query])
-
-            with open(temp_bed_file, 'r') as reader:
-                bed_data = pd.read_csv(reader, sep='\t', header=None)
-
-            bed_data.columns = ['chrom', 'start', 'end']
-            bed_dfs.append(bed_data)
-
-    # turn regions into a dataframe
-
-    if regions:
-        region_df = pd.DataFrame(regions, columns=['chrom', 'start', 'end'])
-        bed_dfs.append(region_df)
-
-    # concatenate all dataframes into a single bed file
-
-    updated_bed = bed_dfs[0]
-
-    for df in bed_dfs[1:]:
-        updated_bed = pd.concat([updated_bed, df])
-
-    # sort gene/region dataframe by chromosome and position
-
-    sorted = updated_bed.sort_values(by=['chrom', 'start'])
-
-    with open(bed_output, 'w') as writer:
-        sorted.to_csv(writer, sep='\t', header=True, index=False)
-
-
-def get_panel_genes(panel_data):
-    """ Given data for a single panel retrieved from PanelApp, parse out
-    and return a list of all unique green gene target HGNC ids.
-
-    args:
-        panel_data [dict]: output of query to PanelApp
-
-    returns:
-        genes [list]
-    """
-
-    genes = []
-
-    for gene in panel_data['genes']:
-
-        if gene['confidence_level'] == '3' and \
-            gene['gene_data']['hgnc_id'] and \
-            (gene['gene_data']['hgnc_id'] not in genes):
-
-            genes.append(gene['gene_data']['hgnc_id'])
-
-    return genes
-
-
-def get_panel_regions(panel_data):
-    """ Given data for a single panel retrieved from PanelApp, parse out
-    and return a list of all unique green regions.
-
-    args:
-        panel_data [dict]: output of query to PanelApp
-
-    returns:
-        regions [list]: each ele has form [<chrom>, <start>, <end>]
-    """
-
-    regions = []
-
-    for region in panel_data['regions']:
-
-        if region['confidence_level'] == '3':
-
-            locus = [
-                region['chromosome'],
-                region['grch38_coordinates'][0],
-                region['grch38_coordinates'][1]]
-
-            regions.append(locus)
-
-    return regions
-
-
-""" process a case json """
+    return case
 
 
 @time_execution
@@ -571,6 +453,33 @@ def get_current_panels(case):
     return case
 
 
+def get_panelapp_panel(panel_id, panel_version=None):
+    """ Query the PanelApp API to retrieve data for the specified
+    version of the specified panel. If version is not specified, returns
+    the panel's current version.
+
+    args:
+        panel_id [str]
+        panel_version [str/None]: retrieves current version if None
+
+    returns:
+        result [dict]: all panel data
+    """
+
+    try:
+        result = Panelapp.Panel(str(panel_id), panel_version).get_data()
+
+    # doesn't work for some older panel versions, for various reasons
+
+    except Exception:
+        path = ["panels", str(panel_id)]
+        param = {"version": panel_version}
+        url = api.build_url(path, param)
+        result = api.get_panelapp_response(url)
+
+    return result
+
+
 def get_case_solved_info(json_data, case):
     """ Get information on whether the case is solved, and any
     originally reported variants along with their classifications.
@@ -718,7 +627,297 @@ def check_proband_vcf(case):
         f"Proband VCF {proband_vcf} not present for case {case['id']}"
 
 
-""" standardise a vcf """
+""" Create bed file """
+
+
+@time_execution
+def create_bed(case, bed_template, bed_output, output_dir):
+    """ Given a set of PanelApp panel IDs, retrieve data for the current
+    versions of those panels and parse out their genes and regions. Use
+    these to create a bed file via the Ensembl BioMart (GRCh38) API.
+    Save this at the location specified by bed_output.
+
+    args:
+        case [dict]
+        bed_template [fp]: location of template for api call
+        bed_output [fp]: location to write output bed file to
+    """
+
+    # list all unique panel genes and regions
+
+    all_genes = []
+    regions = []
+
+    for panel_id, info in case['panels'].items():
+        if info['retrieved_data']:
+
+            panel_genes = get_panel_genes(info['retrieved_data'])
+            panel_regions = get_panel_regions(info['retrieved_data'])
+
+            info['current_genes'] = len(panel_genes)
+            info['current_regions'] = len(panel_regions)
+
+            all_genes += panel_genes
+
+            if panel_regions:
+                for region in panel_regions:
+                    if region not in regions:
+                        regions.append(region)
+
+    if all_genes:
+        genes = list(set(all_genes))
+
+    assert genes or regions, \
+        f"No current versions of original panels available for {case['id']}"
+
+    print(f"Creating bed: {len(genes)} genes and {len(regions)} regions\n")
+
+    bed_dfs = []
+
+    # retrieve gene positions from ensembl biomart (GRCh38), make dataframes
+
+    if genes:
+
+        if len(genes) > 500:
+            groups = [genes[x:x+500] for x in range(0, len(genes), 500)]
+        else:
+            groups = [genes]
+
+        print(f"Genes processed in {len(groups)} group(s)")
+        temp_bed_file = f'{output_dir}temp_bed_file.bed'
+
+        for gene_group in groups:
+
+            with open(bed_template, 'r') as reader:
+                contents = reader.read()
+
+            hgnc_string = ','.join([ele for ele in gene_group])
+            query = contents.replace('PLACEHOLDER', hgnc_string)
+
+            subprocess.run(['wget', '-O', temp_bed_file, query])
+
+            with open(temp_bed_file, 'r') as reader:
+                bed_data = pd.read_csv(reader, sep='\t', header=None)
+
+            bed_data.columns = ['chrom', 'start', 'end']
+            bed_dfs.append(bed_data)
+
+    # turn regions into a dataframe
+
+    if regions:
+        region_df = pd.DataFrame(regions, columns=['chrom', 'start', 'end'])
+        bed_dfs.append(region_df)
+
+    # concatenate all dataframes into a single bed file
+
+    updated_bed = bed_dfs[0]
+
+    for df in bed_dfs[1:]:
+        updated_bed = pd.concat([updated_bed, df])
+
+    # sort gene/region dataframe by chromosome and position
+
+    sorted = updated_bed.sort_values(by=['chrom', 'start'])
+
+    with open(bed_output, 'w') as writer:
+        sorted.to_csv(writer, sep='\t', header=True, index=False)
+
+
+def get_panel_genes(panel_data):
+    """ Given data for a single panel retrieved from PanelApp, parse out
+    and return a list of all unique green gene target HGNC ids.
+
+    args:
+        panel_data [dict]: output of query to PanelApp
+
+    returns:
+        genes [list]
+    """
+
+    genes = []
+
+    for gene in panel_data['genes']:
+
+        if gene['confidence_level'] == '3' and \
+            gene['gene_data']['hgnc_id'] and \
+            (gene['gene_data']['hgnc_id'] not in genes):
+
+            genes.append(gene['gene_data']['hgnc_id'])
+
+    return genes
+
+
+def get_panel_regions(panel_data):
+    """ Given data for a single panel retrieved from PanelApp, parse out
+    and return a list of all unique green regions.
+
+    args:
+        panel_data [dict]: output of query to PanelApp
+
+    returns:
+        regions [list]: each ele has form [<chrom>, <start>, <end>]
+    """
+
+    regions = []
+
+    for region in panel_data['regions']:
+
+        if region['confidence_level'] == '3':
+
+            locus = [
+                region['chromosome'],
+                region['grch38_coordinates'][0],
+                region['grch38_coordinates'][1]]
+
+            regions.append(locus)
+
+    return regions
+
+
+""" Coordinate functions to process case data """
+
+
+def process_case(case, output_dir, use_family):
+
+    """ Process the case's VCFs. Involves standardisation of chromosome
+    notation and reference genomes; annotation; and filtering and
+    prioritising of variants.
+
+    Creates an output excel workbook with details of the analysis and
+    the final prioritised variants.
+
+    args:
+        case [dict]
+        use_family [bool]: whether to use family VCFs in filtering
+    """
+
+    # process the proband's vcf
+
+    case = process_single_individual(case, 'proband', output_dir)
+
+    to_annotate = case['family']['vcfs']['filtered']['proband']
+
+    # use family data (assuming proband not adopted & 1+ other vcf available)
+
+    if use_family:
+
+        case = family_filtering(case, output_dir)
+
+        if case['reanalysis']['used_affection'] == True:
+            to_annotate = case['family']['vcfs']['intersect_affected']
+
+    # get variant annotations and use them to filter variants
+
+    cb_config = case['reanalysis']['static']['cb_config']
+
+    ann_vars = annotation_processing(
+        case['id'], to_annotate, cb_config, output_dir)
+
+    ann_final = apply_filters(case, ann_vars)
+
+    case['variants']['final'] = ann_final
+
+    # create output file
+
+    output_fp = f"{case['id']}_reanalysis_{case['reanalysis']['date']}.xlsx"
+    create_excel(case, output_fp)
+
+
+def process_single_individual(case, relation, output_dir):
+    """ Standardise the VCF for a single individual including fixing
+    chromosome notation and lifting over to GRCh38, before filtering on
+    variant call quality metrics and a bed file.
+
+    args:
+        case [dict]
+        relation [str]: relationship of individual to proband
+
+    returns:
+        case [dict]
+    """
+
+    print(f"\nProcessing {relation} VCF for case {case['id']}")
+
+    case_id = case['id']
+    ref_genome = case['assembly']
+    params = case['reanalysis']['params']
+    static = case['reanalysis']['static']
+    vcf = case['family']['vcfs']['original'][relation]
+
+    original_vars = [key for key in case['variants']['original']]
+    original_vars.sort()
+
+    bed = f"{output_dir}{case_id}.bed"
+    sorted_vcf_1 = f"{output_dir}{case_id}_1_sorted_{relation}.vcf.gz"
+    normalised_vcf = f"{output_dir}{case_id}_2_normalised_{relation}.vcf.gz"
+    renamed_vcf = f"{output_dir}{case_id}_3_renamed_{relation}.vcf.gz"
+    tagged_vcf = f"{output_dir}{case_id}_4_tagged_{relation}.vcf.gz"
+    lifted_vcf = f"{output_dir}{case_id}_5_lifted_{relation}.vcf.gz"
+    prefix = f"{output_dir}{case_id}_6_filtered_{relation}"
+    sorted_vcf_2 = f"{case_id}_7_sorted_{relation}.vcf.gz"
+
+    # standardise vcf
+
+    sort_vcf(vcf, sorted_vcf_1)
+    bgzip_vcf(sorted_vcf_1)
+    normalise_vcf(sorted_vcf_1, normalised_vcf)
+    rename_vcf_chroms(normalised_vcf, renamed_vcf, static['chrom_map'])
+
+    # if ref genome is b37...
+
+    if ref_genome.lower() == "grch37":
+
+        # if the were originally reported variants, tag them in the vcf
+
+        if original_vars and (relation == 'proband'):
+            tag_original_vars(case, renamed_vcf, tagged_vcf)
+            tagged_vars = get_tagged_vars(tagged_vcf)
+            fixed_vcf = tagged_vcf
+
+            assert tagged_vars == original_vars, \
+                f"Original: {original_vars}\nTagged: {tagged_vars}"
+
+        else:
+            fixed_vcf = renamed_vcf
+
+        # lift over to b38
+
+        lift_over_vcf(fixed_vcf, lifted_vcf, static['chain'], static['genome'])
+        case['family']['vcfs']['b38'][relation] = lifted_vcf
+
+        # check there are as many b38 vars as were originally reported
+        # (can't compare them directly because they have different coords)
+
+        if original_vars and (relation == 'proband'):
+            b38_vars = get_tagged_vars(lifted_vcf)
+            case['variants']['b38'] = b38_vars
+
+            assert len(b38_vars) == len(original_vars), \
+                f"{len(original_vars)} original tagged vars " \
+                f"but {len(b38_vars)} tagged b38 vars"
+
+        elif not original_vars:
+            case['variants']['b38'] = original_vars
+
+    # b38 are fine as they are
+
+    elif ref_genome.lower() == "grch38":
+        case['family']['vcfs']['b38'][relation] = renamed_vcf
+        case['variants']['b38'] = original_vars
+
+    b38_vcf = case['family']['vcfs']['b38'][relation]
+
+    # filter on bed file and variant call quality, then sort again
+
+    bed_filtered_vcf = filter_on_bed(b38_vcf, prefix, bed, params)
+    sort_vcf(bed_filtered_vcf, sorted_vcf_2)
+
+    case['family']['vcfs']['filtered'][relation] = sorted_vcf_2
+
+    return case
+
+
+""" Standardise a VCF """
 
 
 @time_execution
@@ -786,6 +985,53 @@ def rename_vcf_chroms(input_vcf, output_vcf, chrom_map):
 
     else:
         print(f'Skipping chromosome renaming ({output_vcf} already exists)')
+
+
+@time_execution
+def filter_on_bed(input_vcf, output_prefix, bed, params):
+    """  Use vcftools to filter variants on variant call quality, and
+    against the regions specified in a supplied bed file. Quality
+    parameters filtered on are QUAL score (minQ), genotype quality (GQ),
+    depth (DP), and whether FILTER = PASS (remove-filtered-all).
+
+    args:
+        input_vcf [str]
+        output_prefix [str]: prefix for output files
+        bed [str]: path to bed file of genomic regions
+        params [dict]: contains filtering parameters
+
+    returns:
+        output_file [str]
+    """
+
+    output_file = f'{output_prefix}.recode.vcf'
+
+    if not os.path.exists(output_file):
+
+        if input_vcf.endswith('.gz'):
+            file_type = '--gzvcf'
+        else:
+            file_type = '--vcf'
+
+        subprocess.run(
+            f"vcftools {file_type} {input_vcf} " \
+            f"--bed {bed} " \
+            f"--remove-filtered-all " \
+            f"--minQ {params['min_qual']} " \
+            f"--minGQ {params['min_gq']} " \
+            f"--minDP {params['min_depth']} " \
+            f"--recode --recode-INFO-all " \
+            f"--out {output_prefix}",
+            shell=True)
+
+    else:
+        print(
+            f'Skipping filtering on bed file ({output_file} already exists)')
+
+    return output_file
+
+
+""" Functions applied if VCF requires liftover """
 
 
 @time_execution
@@ -877,52 +1123,6 @@ def get_tagged_vars(vcf):
 
 
 @time_execution
-def identify_genome(vcf):
-    """ Identify the reference genome used to produce a VCF file.
-
-    args:
-        vcf [str]
-
-    returns:
-        ref_genome [str]: GRCh37 or GRCh38
-    """
-
-    ref_genome = None
-
-    # look for mentions of either ref genome in the vcf
-
-    b37_lines = subprocess.run(
-        'zgrep -cio "GRCh37" LP3000402-DNA_C06_LP3000402-DNA_C06.vcf.gz',
-        shell=True, capture_output=True, text=True).stdout
-
-    b38_lines = subprocess.run(
-        'zgrep -cio "GRCh38" LP3000402-DNA_C06_LP3000402-DNA_C06.vcf.gz',
-        shell=True, capture_output=True, text=True).stdout
-
-    # there should be at least one mention of the build
-
-    assert (int(b37_lines) > 0) or (int(b38_lines) > 0), \
-        f"Error identifying genome for {vcf}: no ref genome specified"
-
-    # identify which ref build is used
-
-    if (int(b37_lines) > 0) and (int(b38_lines) == 0):
-        ref_genome = "GRCh37"
-
-    elif (int(b38_lines) > 0) and (int(b37_lines) == 0):
-        ref_genome = "GRCh38"
-
-    # both ref builds shouldn't be used for the same vcf
-
-    assert ref_genome, \
-        f"Error identifying genome for {vcf}: both ref genomes mentioned"
-
-    print(f"{vcf} uses {ref_genome}")
-
-    return ref_genome
-
-
-@time_execution
 def lift_over_vcf(input_vcf, output_vcf, chain, genome):
     """ Liftover a b37 VCF file to b38 using CrossMap. If potential
     causal variants were identified in the original analysis, confirm
@@ -951,48 +1151,7 @@ def lift_over_vcf(input_vcf, output_vcf, chain, genome):
         print(f'Skipping liftover as {output_vcf} already exists')
 
 
-@time_execution
-def filter_on_bed(input_vcf, output_prefix, bed, params):
-    """  Use vcftools to filter variants on variant call quality, and
-    against the regions specified in a supplied bed file. Quality
-    parameters filtered on are QUAL score (minQ), genotype quality (GQ),
-    depth (DP), and whether FILTER = PASS (remove-filtered-all).
-
-    args:
-        input_vcf [str]
-        output_prefix [str]: prefix for output files
-        bed [str]: path to bed file of genomic regions
-        params [dict]: contains filtering parameters
-
-    returns:
-        output_file [str]
-    """
-
-    output_file = f'{output_prefix}.recode.vcf'
-
-    if not os.path.exists(output_file):
-
-        if input_vcf.endswith('.gz'):
-            file_type = '--gzvcf'
-        else:
-            file_type = '--vcf'
-
-        subprocess.run(
-            f"vcftools {file_type} {input_vcf} " \
-            f"--bed {bed} " \
-            f"--remove-filtered-all " \
-            f"--minQ {params['min_qual']} " \
-            f"--minGQ {params['min_gq']} " \
-            f"--minDP {params['min_depth']} " \
-            f"--recode --recode-INFO-all " \
-            f"--out {output_prefix}",
-            shell=True)
-
-    else:
-        print(
-            f'Skipping filtering on bed file ({output_file} already exists)')
-
-    return output_file
+""" Filter variants using available family data """
 
 
 @time_execution
@@ -1065,45 +1224,6 @@ def family_filtering(case, output_dir):
     return case
 
 
-def filter_on_affection(case, vcfs, output_dir):
-    """ Uses bedtools intersect to identify variants present in the VCFs
-    of all affected family members.
-
-    args:
-        case [dict]
-        vcfs [str]: in form "<fp 1> <fp 2> ... <fp N>"
-
-    returns:
-        case [dict]: paths of VCFs filtered on segregation added
-    """
-
-    case['family']['vcfs']['intersect_affected'] = None
-    p_vcf = case['family']['vcfs']['filtered']['proband']
-    output_fp = f"{output_dir}{case['id']}_intersect_affected.vcf.gz"
-
-    # get intersection vcf for all affected individuals
-
-    if not os.path.exists(output_fp):
-
-        print("Intersecting proband and affected relation VCFs")
-
-        subprocess.run(
-            f"bedtools intersect -u -header -a {p_vcf} -b {vcfs} " \
-            f"| gzip > {output_fp}",
-            shell=True)
-
-    else:
-        print(f"Skipping intersect step ({output_fp} already exists)")
-
-    # update case dict
-
-    if os.path.exists(output_fp):
-        case['family']['vcfs']['intersect_affected'] = output_fp
-        case['reanalysis']['used_affection'] = True
-
-    return case
-
-
 def identify_de_novo(case, output_dir):
     """  """
 
@@ -1152,105 +1272,76 @@ def identify_de_novo(case, output_dir):
     return case
 
 
-def process_single_individual(case, relation, output_dir):
-    """ Standardise the VCF for a single individual including fixing
-    chromosome notation and lifting over to GRCh38, before filtering on
-    variant call quality metrics and a bed file.
+def filter_on_affection(case, vcfs, output_dir):
+    """ Uses bedtools intersect to identify variants present in the VCFs
+    of all affected family members.
 
     args:
         case [dict]
-        relation [str]: relationship of individual to proband
+        vcfs [str]: in form "<fp 1> <fp 2> ... <fp N>"
 
     returns:
-        case [dict]
+        case [dict]: paths of VCFs filtered on segregation added
     """
 
-    print(f"\nProcessing {relation} VCF for case {case['id']}")
+    case['family']['vcfs']['intersect_affected'] = None
+    p_vcf = case['family']['vcfs']['filtered']['proband']
+    output_fp = f"{output_dir}{case['id']}_intersect_affected.vcf.gz"
 
-    case_id = case['id']
-    ref_genome = case['assembly']
-    params = case['reanalysis']['params']
-    static = case['reanalysis']['static']
-    vcf = case['family']['vcfs']['original'][relation]
+    # get intersection vcf for all affected individuals
 
-    original_vars = [key for key in case['variants']['original']]
-    original_vars.sort()
+    if not os.path.exists(output_fp):
 
-    bed = f"{output_dir}{case_id}.bed"
-    sorted_vcf_1 = f"{output_dir}{case_id}_1_sorted_{relation}.vcf.gz"
-    normalised_vcf = f"{output_dir}{case_id}_2_normalised_{relation}.vcf.gz"
-    renamed_vcf = f"{output_dir}{case_id}_3_renamed_{relation}.vcf.gz"
-    tagged_vcf = f"{output_dir}{case_id}_4_tagged_{relation}.vcf.gz"
-    lifted_vcf = f"{output_dir}{case_id}_5_lifted_{relation}.vcf.gz"
-    prefix = f"{output_dir}{case_id}_6_filtered_{relation}"
-    sorted_vcf_2 = f"{case_id}_7_sorted_{relation}.vcf.gz"
+        print("Intersecting proband and affected relation VCFs")
 
-    # standardise vcf
+        subprocess.run(
+            f"bedtools intersect -u -header -a {p_vcf} -b {vcfs} " \
+            f"| gzip > {output_fp}",
+            shell=True)
 
-    sort_vcf(vcf, sorted_vcf_1)
-    bgzip_vcf(sorted_vcf_1)
-    normalise_vcf(sorted_vcf_1, normalised_vcf)
-    rename_vcf_chroms(normalised_vcf, renamed_vcf, static['chrom_map'])
+    else:
+        print(f"Skipping intersect step ({output_fp} already exists)")
 
-    # # identify the reference genome
+    # update case dict
 
-    # ref_genome = identify_genome(renamed_vcf)
-
-    # if ref genome is b37...
-
-    if ref_genome.lower() == "grch37":
-
-        # if the were originally reported variants, tag them in the vcf
-
-        if original_vars and (relation == 'proband'):
-            tag_original_vars(case, renamed_vcf, tagged_vcf)
-            tagged_vars = get_tagged_vars(tagged_vcf)
-            fixed_vcf = tagged_vcf
-
-            assert tagged_vars == original_vars, \
-                f"Original: {original_vars}\nTagged: {tagged_vars}"
-
-        else:
-            fixed_vcf = renamed_vcf
-
-        # lift over to b38
-
-        lift_over_vcf(fixed_vcf, lifted_vcf, static['chain'], static['genome'])
-        case['family']['vcfs']['b38'][relation] = lifted_vcf
-
-        # check there are as many b38 vars as were originally reported
-        # (can't compare them directly because they have different coords)
-
-        if original_vars and (relation == 'proband'):
-            b38_vars = get_tagged_vars(lifted_vcf)
-            case['variants']['b38'] = b38_vars
-
-            assert len(b38_vars) == len(original_vars), \
-                f"{len(original_vars)} original tagged vars " \
-                f"but {len(b38_vars)} tagged b38 vars"
-
-        elif not original_vars:
-            case['variants']['b38'] = original_vars
-
-    # b38 are fine as they are
-
-    elif ref_genome.lower() == "grch38":
-        case['family']['vcfs']['b38'][relation] = renamed_vcf
-        case['variants']['b38'] = original_vars
-
-    b38_vcf = case['family']['vcfs']['b38'][relation]
-
-    # filter on bed file and variant call quality, then sort again
-
-    bed_filtered_vcf = filter_on_bed(b38_vcf, prefix, bed, params)
-    sort_vcf(bed_filtered_vcf, sorted_vcf_2)
-
-    case['family']['vcfs']['filtered'][relation] = sorted_vcf_2
+    if os.path.exists(output_fp):
+        case['family']['vcfs']['intersect_affected'] = output_fp
+        case['reanalysis']['used_affection'] = True
 
     return case
 
 
-""" annotate & filter VCFs """
+""" Retrieve and parse variant annotation data """
+
+
+@time_execution
+def annotation_processing(case_id, vcf, cb_config, output_dir):
+    """  """
+
+    # specify the location to store annotation output
+
+    anno_dir = f"{output_dir}temp_anno_files/"
+    output_fp = f"{anno_dir}{case_id}_combined_annotation.json"
+
+    if not os.path.exists(anno_dir):
+        subprocess.run(f"mkdir {anno_dir}", shell=True)
+
+    # process variants in smaller subgroups for memory purposes
+
+    if not os.path.exists(output_fp):
+
+        var_groups = split_large_vcfs(case_id, vcf, anno_dir)
+
+        for i in range(var_groups):
+
+            vars_fp = f"{anno_dir}{case_id}_group_{i}.txt"
+            anno_fp = f"{anno_dir}{case_id}_group_{i}_annotation.json"
+
+            get_annotation(i, vars_fp, anno_fp, cb_config)
+
+    ann_vars = combine_files(case_id, anno_dir, output_fp)
+
+    return ann_vars
 
 
 def split_large_vcfs(case_id, vcf, anno_dir):
@@ -1457,58 +1548,7 @@ def combine_files(case_id, anno_dir, output_fp):
         return variants
 
 
-def retrieve_cadd(variant):
-    """ retrieve and return the cadd score for an SNV variant """
-
-    cadd = None
-
-    chrom, pos, ref, alt = variant['id'].split(':')
-    var = f"{chrom}:{pos}_{ref}_{alt}"
-
-    result = subprocess.run(
-        'curl -i ' \
-        f'https://cadd.gs.washington.edu/api/v1.0/GRCh38-v1.6/{var}',
-        shell=True, capture_output=True, text=True).stdout
-
-    if result:
-
-        pattern = r'(?<="PHRED":")(.*?)(?=")'
-        regex = re.findall(pattern, result)
-
-        if regex and (len(regex) == 1):
-            cadd = float(regex[0])
-
-    return cadd
-
-
-@time_execution
-def annotation_processing(case_id, vcf, cb_config, output_dir):
-    """  """
-
-    # specify the location to store annotation output
-
-    anno_dir = f"{output_dir}temp_anno_files/"
-    output_fp = f"{anno_dir}{case_id}_combined_annotation.json"
-
-    if not os.path.exists(anno_dir):
-        subprocess.run(f"mkdir {anno_dir}", shell=True)
-
-    # process variants in smaller subgroups for memory purposes
-
-    if not os.path.exists(output_fp):
-
-        var_groups = split_large_vcfs(case_id, vcf, anno_dir)
-
-        for i in range(var_groups):
-
-            vars_fp = f"{anno_dir}{case_id}_group_{i}.txt"
-            anno_fp = f"{anno_dir}{case_id}_group_{i}_annotation.json"
-
-            get_annotation(i, vars_fp, anno_fp, cb_config)
-
-    ann_vars = combine_files(case_id, anno_dir, output_fp)
-
-    return ann_vars
+""" Filter variants on annotation """
 
 
 @time_execution
@@ -1593,7 +1633,32 @@ def apply_filters(case, all_vars):
     return output_vars
 
 
-""" return output """
+def retrieve_cadd(variant):
+    """ retrieve and return the cadd score for an SNV variant """
+
+    cadd = None
+
+    chrom, pos, ref, alt = variant['id'].split(':')
+    var = f"{chrom}:{pos}_{ref}_{alt}"
+
+    result = subprocess.run(
+        'curl -i ' \
+        f'https://cadd.gs.washington.edu/api/v1.0/GRCh38-v1.6/{var}',
+        shell=True, capture_output=True, text=True).stdout
+
+    if result:
+
+        pattern = r'(?<="PHRED":")(.*?)(?=")'
+        regex = re.findall(pattern, result)
+
+        if regex and (len(regex) == 1):
+            cadd = float(regex[0])
+
+    return cadd
+
+
+""" Return output as Excel workbook """
+
 
 @time_execution
 def create_excel(case, output_fp):
@@ -1808,139 +1873,6 @@ def format_workbook(output_fp):
         ws3.column_dimensions[col].width = 20
 
     wb.save(filename=output_fp)
-
-
-""" coordinate & execute """
-
-
-def get_cases_list(args):
-    """ Parse the arguments from the call to caerus.py to obtain a list
-    of cases to process.
-
-    args:
-        args [list]: has the value of sys.argv[1:]
-
-    returns:
-        cases [list]: ids of cases to process
-    """
-
-    assert args, \
-        "\nCall to caerus.py requires at least one argument. Examples:\n" \
-        "\tA single case ID\n" \
-        "\tA space-separated list of case IDs\n" \
-        "\tFilepath of a .txt file containing a case ID on each line\n\n" \
-        "Alternatively, use the argument 'all' to process all cases for " \
-        "which files are available in 003_230124_caerus.\n\n" \
-        "Case IDs should include their version, e.g. SAP-55997-1."
-
-    if len(args) == 1:
-
-        # process all cases for which we have a json and at least one vcf
-        if args[0] == 'all':
-
-            subprocess.run('list_project_cases.sh', shell=True)
-
-            with open('usable_project_cases.txt', 'r') as reader:
-                cases = [case.strip() for case in reader.readlines()
-                    if case.strip()]
-
-        # process a list of cases supplied as lines of a text file
-        elif args[0].endswith('.txt'):
-
-            with open(args[0], 'r') as reader:
-                cases = [case.strip() for case in reader.readlines()
-                    if case.strip()]
-
-        # otherwise assume the arg is a single case id
-        else:
-            cases = [args[0]]
-
-    # if there are multiple args, assume they're a list of case ids
-    else:
-        cases = args[0:]
-
-    return cases
-
-
-def initialise_case(case_id, params, static, date):
-    """ Coordinate the functions to initialise the object which holds
-    all the relevant case information.
-
-    args:
-        case_id [str]
-        params [dict]: parameter values to filter variants against
-        static [dict]: paths to static files
-        date [str]: date or reanalysis
-
-    returns:
-        case [dict]
-    """
-
-    json_fp = download_files(case_id)
-
-    with open(json_fp, 'r') as reader:
-        json_data = json.load(reader)
-
-    check_rd_case(json_data)
-
-    case = setup_case_dict(json_data, params, static, date)
-    case = get_family_info(json_data, case)
-    case = get_original_panels(json_data, case)
-    case = get_current_panels(case)
-    case = get_case_solved_info(json_data, case)
-
-    check_proband_vcf(case)
-
-    case_vcfs = case['family']['vcfs']['original']
-    print(f"\nCase: {case_id}\nJSON: {json_fp}\nVCFs: {case_vcfs}")
-
-    return case
-
-
-def process_case(case, output_dir, use_family):
-
-    """ Process the case's VCFs. Involves standardisation of chromosome
-    notation and reference genomes; annotation; and filtering and
-    prioritising of variants.
-
-    Creates an output excel workbook with details of the analysis and
-    the final prioritised variants.
-
-    args:
-        case [dict]
-        use_family [bool]: whether to use family VCFs in filtering
-    """
-
-    # process the proband's vcf
-
-    case = process_single_individual(case, 'proband', output_dir)
-
-    to_annotate = case['family']['vcfs']['filtered']['proband']
-
-    # use family data (assuming proband not adopted & 1+ other vcf available)
-
-    if use_family:
-
-        case = family_filtering(case, output_dir)
-
-        if case['reanalysis']['used_affection'] == True:
-            to_annotate = case['family']['vcfs']['intersect_affected']
-
-    # get variant annotations and use them to filter variants
-
-    cb_config = case['reanalysis']['static']['cb_config']
-
-    ann_vars = annotation_processing(
-        case['id'], to_annotate, cb_config, output_dir)
-
-    ann_final = apply_filters(case, ann_vars)
-
-    case['variants']['final'] = ann_final
-
-    # create output file
-
-    output_fp = f"{case['id']}_reanalysis_{case['reanalysis']['date']}.xlsx"
-    create_excel(case, output_fp)
 
 
 def main():
